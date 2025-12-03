@@ -10,7 +10,7 @@
 # FROM gcr.io/distroless/java21-debian12
 
 # This base image has no vulnerabilities
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:21-jre-noble
 
 # UPDATING AND UPGRADING THE SYSTEM PACKAGES THAT HAS CVE VULNERABILITIES
 # RUN apt update -y \
