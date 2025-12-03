@@ -182,7 +182,7 @@ pipeline {
             sshagent(['github-ssh-key']) {
 
               // detect default branch of manifest repo, fallback to main
-              def targetBranch = sh(script: "git ls-remote --symref ${MANIFEST_REPO} HEAD 2>/dev/null | sed -n 's@^ref: refs/heads/@@p' | head -n1 || echo main", returnStdout: true).trim()
+              def targetBranch = sh(script: "git ls-remote --symref ${MANIFEST_REPO} HEAD 2>/dev/null | sed -n 's@^ref: refs/heads/\([^ ]*\) HEAD$@\1@p' | head -n1 || echo main", returnStdout: true).trim()
               if (!targetBranch) { targetBranch = 'main' }
               echo "Detected target branch: ${targetBranch}"
 
