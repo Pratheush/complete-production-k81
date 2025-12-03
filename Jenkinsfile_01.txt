@@ -1,0 +1,376 @@
+/*🔎 Why BUILD_NUMBER Works Without Definition
+  Jenkins automatically provides a set of environment variables for every build.
+  BUILD_NUMBER is one of them — it’s the sequential number of the current build (e.g., 1, 2, 3…).
+    Other examples:
+    JOB_NAME → name of the job.
+    BUILD_ID → unique build timestamp.
+    WORKSPACE → path to the job’s workspace.
+    GIT_COMMIT → commit hash if using Git SCM.
+    Because Jenkins injects these variables into the environment, you don’t need to declare them in your Jenkinsfile. You can directly reference them as env.BUILD_NUMBER.
+
+Best-practice notes and small improvements
+1. Label safety: Use a more precise sed pattern to avoid touching non-deployment YAMLs (e.g., only files under deployments/ or only lines within containers sections).
+2. Selective update: If you maintain multiple services, consider matching on the specific image repo name before replacing.
+3. YAML-aware edits: Tools like yq can update YAML keys without regex replacement, reducing risk of unintended changes.
+4. PR metadata: Add commit SHA, build URL, and changelog to the PR body to help reviewers.
+5. Auth setup: Ensure gh is authenticated for the Jenkins agent and that the ssh key has push rights to the repo.
+ */
+pipeline {
+    
+  parameters {
+  booleanParam(name: 'CLEANUP_ENABLED', defaultValue: true, description: 'Clean up Docker images after push')
+  }
+  
+  // Define the agent where the pipeline will run.
+  // 'any' means Jenkins will pick any available agent.
+  // If you have a specific label for your Windows 11 machine (e.g., 'windows-agent'),
+  // you can use 'agent { label 'windows-agent' }' instead.
+  // agent { label 'windows-docker' }
+  // agent { label 'linux' }
+  // Use a specific agent label for consistency and to ensure the right machine is used.
+  agent any
+  
+  tools {
+    maven "maven_3_9_5"
+    // make sure this name matches the configured JDK name inside Jenkins this way we can specify jdk specifically an another version for a pipeline
+    // jdk "jdk21"
+  }
+  
+  // If you don't want Jenkins to do that auto-checkout and only want to rely on your git step, you could set:  skipDefaultCheckout(true)
+  // skipDefaultCheckout(false) means: Jenkins will perform the default checkout scm at the start of the pipeline.
+  // Keep this to have full control over the checkout process.
+  options {
+    skipDefaultCheckout(true)
+    // buildDiscarder(logRotator(numToKeepStr: '5'))
+  }
+
+  // Define environment variables.
+  // IMPORTANT: Replace 'your-dockerhub-username' and 'your-repo-name'
+  // The 'docker-hub-credentials' should be a 'Secret text' credential in Jenkins or UsernameAndPassword type
+  // storing your Docker Hub password/token.
+  environment {
+    DOCKER_IMAGE_NAME = 'pratheush/spring-customer-mgmt-jenkins-cicd'
+    // Stored DockerHub Credentials In Jenkins credentials ID
+    DOCKER_CREDENTIALS_ID = 'dockerhub-uname-pwd-token'
+    SONAR_TOKEN = credentials('jenkins-sonarqube-token')
+  }
+
+  // Define triggers for the pipeline.
+  // 'githubPush()' configures the pipeline to be triggered by GitHub push events.
+  triggers {
+    // This allows GitHub to trigger builds on push (needs webhook configured)
+    // // Ensure you have configured a GitHub webhook in your repository settings pointing to your Jenkins instance.
+    githubPush()
+  }
+
+  // Define the stages of your CI/CD pipeline.
+  stages {
+      
+    // Stage 1: Checkout Source Code 
+    stage('Checkout') {
+      steps {
+        echo '📦 Checking out source code...'
+        // Checkout the SCM (Source Code Management) configured for this job. This typically points to your GitHub repository.
+        // The git step is correctly configured for a public repo. For a private one, use credentials.
+        git branch: 'master', url: 'https://github.com/Pratheush/mycicd2.git'
+      }
+    }
+
+
+    // HERE at this stage Trivy scan means Early detection of vulnerable dependencies before packaging or containerizing
+    // Scan Spring Boot Dependencies with Trivy
+    // Trivy supports scanning Java projects via:
+    // pom.xml (Maven), .jar files(with limitations for SpringBoot fat JARs), local filesystem (trivy fs.)
+    // This scans your project directory, including pom.xml, and flags vulnerable libraries
+    // --vuln-type library FLAG Scans for vulnerabilities in application dependencies (e.g., Maven libraries)
+    // . Target directory — the current working directory (your Spring Boot project root)
+    // trivy fs  will Scans the local filesystem (your source code directory)
+    // It scans Dependency versions and known CVEs and Vulnerabilities in third-party libraries (like Spring, Jackson, Hibernate, etc.) and scans pom.xml and target directory
+    // WARN	'--vuln-type' is deprecated. Use '--pkg-types' instead.
+    stage('Trivy Scan - Filesystem - Maven Dependencies') {
+      steps {
+        script {
+          echo "🔍 Trivy Scan for Maven Dependencies (Filesystem)..."
+          // sh 'trivy fs . --exit-code 1 --severity HIGH,CRITICAL --no-progress'
+          // sh 'trivy fs --exit-code 1 --severity HIGH,CRITICAL --no-progress --vuln-type library .'
+
+          // Download HTML template for Trivy report
+          sh "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl > html.tpl"
+
+          // Run Trivy scan and generate HTML report
+          sh "trivy fs --exit-code 1 --severity HIGH,CRITICAL --no-progress --pkg-types library --format template --template \"@html.tpl\" -o report-trivy-fs.html ."
+
+          // Publish the report to Jenkins UI
+          // 📦 Scans your  and resolved dependencies for known CVEs.
+          // 🧠 Helps catch issues before Docker packaging or deployment.
+          // 📊 Makes results visible in Jenkins under HTML Reports, so you don’t need to dig through logs.
+          publishHTML([
+            reportDir: '.',
+            reportFiles: 'report-trivy-fs.html',
+            reportName: 'Trivy Filesystem Maven Dependency Scan Security-Report'
+          ])
+
+        }
+      }
+    }
+
+    // Stage 2: Build Spring Boot Application
+    // FOR ONE-LINER AND SIMPLICITY WE CAN USE DIRECTLY HERE IN BUILDING AND TESTING APP :: sh 'mvn clean verify sonar:sonar -Dsonar.login=$SONAR_TOKEN'
+    // FOR PRODUCTION SEPARATE STAGES ARE CONFIGURED
+    stage('Build & Test App') {
+      steps {
+        echo '🛠️ Building Spring Boot application with Maven...'
+        // Use 'bat' for Windows
+        // 'mvn clean package' cleans the target directory and packages the application into a JAR file (typically in the 'target' directory).
+        // -DskipTests to skip tests during build, remove if you want tests to run
+        // bat './mvnw clean package -DskipTests'
+        // bat './mvnw clean verify'
+        // sh 'mvn clean package'
+        sh 'mvn clean verify'
+      }
+    }
+
+    // Running Unit Tests on SPringBoot Application
+    // Merge BUILD & TEST APP  and TEST stages: Since 'mvn clean verify' already runs tests, the separate 'mvn test' stage may be redundant unless you're isolating test types (e.g., unit vs integration).
+    // stage('Test') {
+    //   steps {
+    //     echo 'Running Unit Tests SpringBoot Application'
+    //     sh 'mvn test'
+    //   }
+    // }
+
+    // Running Static Code Analysis Via SonarQube
+    stage('SonarQube Analysis') {
+      steps {
+        echo 'Going to Run static code analysis SpringBoot Application'
+        withSonarQubeEnv(installationName: 'sonarqube') {
+          echo 'Starting Running STATIC CODE ANALYSIS on SPRINGBOOT APPLICATION....'  
+          // Below here Default Sonar configured and specified in Jenkins would be used
+          // sh 'mvn verify sonar:sonar -Dsonar.login=$SONAR_TOKEN'
+          // Below here specifying which sonar maven version plugin should be used
+          //sh 'mvn org.sonarsource.scanner.maven:sonar-maven-plugin:3.9.0.2155:sonar -Dsonar.login=$SONAR_TOKEN'
+
+          // as -Dsonar.login has been deprecated we use -Dsonar.token instead
+          // sh 'mvn verify sonar:sonar -Dsonar.token=$SONAR_TOKEN'
+
+          // Tell SonarQube Where to Find the Report Update SonarQube analysis stage like this: 
+          // sh 'mvn verify sonar:sonar -Dsonar.token=$SONAR_TOKEN -Dsonar.projectKey=mycicd2 -Dsonar.host.url=http://localhost:9000 -Dsonar.junit.reportPaths=target/surefire-reports,target/failsafe-reports -Dsonar.coverage.jacoco.xmlReportPaths=target/jacoco-report/jacoco.xml'
+          sh 'mvn sonar:sonar -Dsonar.token=$SONAR_TOKEN -Dsonar.projectKey=customer-mgmt-jenkins-projectKey -Dsonar.projectName=customer-mgmt-jenkins-projectName -Dsonar.projectVersion=1.0 -Dsonar.host.url=http://localhost:9000 -Dsonar.junit.reportPaths=target/surefire-reports,target/failsafe-reports -Dsonar.coverage.jacoco.xmlReportPaths=target/jacoco-report/jacoco.xml'
+
+        }
+      }
+    }
+
+    // Enable Quality Gates (Optional but Recommended)
+    // we wanted to make sure a quality gate is passed 
+    // In SonarQube, configure a Quality Gate , Add a webhook in SonarQube to notify Jenkins of pass/fail status
+    // we are gonna get Three minutes timeout and we are gonna wait for quality-gate TO PASS/FAIL and BASED ON QUALITY-GATE if the quality-gates pass/fail . if it comes with failed quality-gate this pipeline is going to abort
+    // or if quality-gate comes with pass then pipeline will continue further and succeed
+    stage("Quality Gate") {
+      steps {
+        echo 'Quality Gate PASS/FAIL CHECK'
+        timeout(time: 5, unit: 'MINUTES') {
+          // waitForQualityGate abortPipeline: true
+          // No need for credentialsId here if already in withSonarQubeEnv
+          waitForQualityGate abortPipeline: true, credentialsId: 'jenkins-sonarqube-token'
+        }
+      }
+    }
+
+
+    // Stage 3: Build Docker Image
+    // docker build -t spring-taskapp-jenkins-k8-cicd:1.0 .
+     stage('Build Docker Image') {
+      steps {
+        echo '🐳 Building Docker image...'
+        // Build the Docker image.
+        // Assumes a Dockerfile exists in the root of your project.
+        // .    the current directory where Dockerfile and project file lives
+        // build   command passes to batch file which builds Docker Image
+        // -t     tags the image with the name from the environment variable and gives it the latest tag
+        // Uses multi-tag Docker image (short-commit and latest) — good practice.
+        script {
+          echo '🐳 Building Docker image INSIDE SCRIPT SECTION'
+          def shortCommit = sh(script: 'git rev-parse --short HEAD', returnStdout: true).trim()
+          def imageTag    = "${DOCKER_IMAGE_NAME}:${shortCommit}"
+          def latestTag   = "${DOCKER_IMAGE_NAME}:latest"
+
+          // def imageTag = "my-app:${env.BUILD_NUMBER}"
+          // sh "docker build -t my-dockerhub-user/my-app:${imageTag} ."
+
+          echo "🔖 shortCommit: ${shortCommit}"
+          echo "📸 imageTag: ${imageTag}"
+          echo "🆕 latestTag: ${latestTag}"
+          
+          sh "docker build -t ${imageTag} -t ${latestTag} ."
+          
+          echo ' Docker image BUILT '    
+          
+          // Save to environment for next stage
+          env.IMAGE_TAG = imageTag
+          env.LATEST_TAG = latestTag
+          echo "✅ Built image: ${env.IMAGE_TAG} and tagged as latest"
+        }
+      }
+    }
+
+   /*  THIS WAY IS SCANNING OUR FINAL IMAGE FOR VULNERABILITIES
+    - --exit-code 1 will fail the build if vulnerabilities of specified severity are found
+    - You can add --format json or --template to generate reports. - For HTML reports, use Trivy’s template
+    - Use double quotes around @html.tpl inside the shell string to avoid Groovy parsing issues.
+    when we want to track severity only HIGH and CRITICAL we mention severity with --severity flag. flags like low/medium/high/critical etc so here we are ignoring all severity less than high.
+    --no-progress flag will suppress the progress in the console-output log.
+    --exit-code 1 means that if trivy finds anything in built docker image with any vulnerability i.e. in a case of High/Critical severity then return as failure.by default exit-code is always zero or 0
+    so in case of failure i.e. vulnerability found with severity of HIGH/CRITICAL then return the exit-code 1 and thus the job will fail.
+    --format template --template -o *.html flag is saving the result of Trivy scanning into the html file using format-template into the template of html.tpl. format Table is (default)
+    --image flag tells to trivy-scan the docker-image
+    --exit-code 1   # Exit with code 1 if vulnerabilities found
+    --severity HIGH,CRITICAL   # Only scan/report high severity issues */
+    stage('Trivy Scan - Docker Image') {
+            steps {
+              script {
+                echo "🔍 Trivy Scan Docker Image Built For Vulnerabilities...with severity of HIGH/CRITICAL"
+
+                // Option 2: Docker (uncomment if using containerized Trivy)
+                // sh 'docker run --rm -v /var/run/docker.sock:/var/run/docker.sock aquasec/trivy image --exit-code 1 --severity HIGH,CRITICAL $FULL_IMAGE'
+
+                sh "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl > html.tpl"
+                //trivy image --format template --template "@html.tpl" -o report.html $IMAGE_NAME
+
+
+                //sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress ${env.IMAGE_TAG}"
+                //sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress ${env.LATEST_TAG}"
+
+                // sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress --format template --template "@html.tpl" -o report.html ${env.IMAGE_TAG}"
+                // sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress --format template --template "@html.tpl" -o report.html ${env.LATEST_TAG}"
+
+                // sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress --format template --template \"@html.tpl\" -o \"report-${env.IMAGE_TAG}.html\"  ${env.IMAGE_TAG}"
+                sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress --format template --template \"@html.tpl\" -o report-trivy-docker-image-latest.html  ${env.LATEST_TAG}"
+
+                // Publish Trivy HTML report (for latest tag)
+                publishHTML([
+                  reportDir: '.',
+                  reportFiles: 'report-trivy-docker-image-latest.html',
+                  reportName: 'Trivy Final DockerImage Scan Security-Report'
+                ])
+
+                }
+            }
+    }
+    
+    // This defines a named pipeline stage that focuses on pushing a built Docker image to DockerHub.
+    // Inside the steps block, the script section allows you to run Groovy-based custom logic
+    // DOCKER_CREDENTIALS_ID refers to the Jenkins credentials ID configured in Jenkins to store your DockerHub username/password or token. 
+    // Push Docker Image to DockerHub stage using withDockerRegistry {} is more robust and secure for Windows environments:
+    // - Cross-platform compatible: No piping issues like you’d face with --password-stdin.
+
+    stage('Push Docker Image to DockerHub') {
+      steps {
+        echo '🚀 Pushing Docker image... using withCredentials : usernamePassword Way'
+        withCredentials([usernamePassword(credentialsId: DOCKER_CREDENTIALS_ID,
+                                          usernameVariable: 'DOCKER_USER',
+                                          passwordVariable: 'DOCKER_PASS')]) {
+            sh """
+               echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+               docker push ${env.IMAGE_TAG}
+               docker push ${env.LATEST_TAG}
+           """
+        }
+        echo "🚀 Docker image ${env.IMAGE_TAG} pushed to DockerHub successfully!"
+        echo "✅ Tagged as latest: ${env.LATEST_TAG}"
+      }
+    }
+    
+//     stage('Push Docker Image to DockerHub') {
+//       steps {
+//         echo '🔐 Logging in to DockerHub using withDockerRegistry...'
+//         withDockerRegistry([credentialsId: DOCKER_CREDENTIALS_ID, url: '']) {
+//         //sh "docker push ${env.IMAGE_TAG}"
+//         sh "docker push ${env.LATEST_TAG}"
+//       }
+//       echo "🚀 Docker image ${env.IMAGE_TAG} pushed to DockerHub successfully!"
+//       echo "✅ Tagged as latest: ${env.LATEST_TAG}"
+//     }
+//    }
+
+
+
+   stage('Trigger ManifestUpdate') {
+       steps {
+           script {
+               // Clone GitOps repo containing manifests
+               sh "git clone https://github.com/org/k8s-manifests.git"
+               dir('k8s-manifests') {
+                   // Update Deployment manifest with new image tag
+                   sh """
+                   sed -i 's|image: my-dockerhub-user/my-app:.*|image: my-dockerhub-user/my-app:${env.BUILD_NUMBER}|g' deployment.yaml
+                   git config user.email 'jenkins@org.com'
+                   git config user.name 'Jenkins CI'
+                   git add deployment.yaml
+                   git commit -m 'Update image tag to ${env.BUILD_NUMBER}'
+                   git push https://github.com/org/k8s-manifests.git HEAD:main
+                   """
+               }
+           }
+       }
+   }
+
+   
+   stage('Clean Docker Images (optional)') {
+      when {
+        expression { params.CLEANUP_ENABLED }
+      }
+      steps {
+        echo "🧹 Cleaning up local Docker images as cleanup is enabled..."
+        script {
+          def status1 = sh(script: "docker rmi ${env.IMAGE_TAG}", returnStatus: true)
+          def status2 = sh(script: "docker rmi ${env.LATEST_TAG}", returnStatus: true)
+          echo "🧹 Cleanup status: IMAGE_TAG=${status1}, LATEST_TAG=${status2}"
+        }
+      }
+   }
+
+    
+  }
+
+  // Uses cleanWs() in post block — clean workspace ensures clean builds
+  // cleanWs() is a predefined method provided by the Workspace Cleanup Plugin in Jenkins. It’s specifically designed for use in Declarative Pipelines, and you’re using it perfectly in the post section to clean up the workspace after every build.
+  // Define post-build actions, e.g., send notifications. 
+  // Plugin Name: Pipeline: Basic Steps
+  // Functionality Provided: archiveArtifacts, deleteDir, stash, unstash, and other essential pipeline steps
+  post {
+    always {
+      // Archive JUnit test reports  
+      junit '**/surefire-reports/*.xml, **/failsafe-reports/*.xml'
+
+      // Record Jacoco coverage reports
+      // jacoco() is not available method since jacoco plugin is not installed in jenkins as jacoco plugin is depracted
+      // recordCoverage tools: [jacoco()]
+      // publishCoverage adapters: [jacocoAdapter('target/jacoco-report/jacoco.xml')], sourceFileResolver: sourceFiles('STORE_LAST_BUILD')
+      recordCoverage(tools: [[parser: 'JACOCO', pattern: 'target/jacoco-report/jacoco.xml']], sourceDirectories: [[path: 'src/main/java']])
+
+      // Archive all Trivy HTML reports 
+      // report-${env.IMAGE_TAG}.html,  report-${env.LATEST_TAG}.html
+      // archiveArtifacts artifacts: '**/trivy-report*.json', onlyIfSuccessful: true
+      // archiveArtifacts artifacts: '**/report-${env.IMAGE_TAG}.html', onlyIfSuccessful: true
+      // archiveArtifacts artifacts: '**/report-${env.LATEST_TAG}.html', onlyIfSuccessful: true
+      archiveArtifacts artifacts: 'report-*.html', onlyIfSuccessful: false
+
+      echo "🏁 Cleaning Workspace."
+      cleanWs()
+      echo "🏁 Pipeline execution finished."
+      // You can add more post-build actions here, e.g., email notifications, Slack messages.
+      // For example:
+      // mail to: 'your-email@example.com',
+      //      subject: "Jenkins Build ${currentBuild.displayName}: ${currentBuild.currentResult}",
+      //      body: "Build ${currentBuild.displayName} (${env.BUILD_URL}) finished with status ${currentBuild.currentResult}"
+    }
+    success {
+      echo '✅ Pipeline executed successfully.'
+      echo '🚀 Docker image successfully built and pushed!'
+    }
+    failure {
+      echo "❌ CI/CD Pipeline failed!"
+    }
+  }
+}

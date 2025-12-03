@@ -1,0 +1,353 @@
+pipeline {
+
+  parameters {
+    booleanParam(name: 'CLEANUP_ENABLED', defaultValue: true, description: 'Clean up Docker images after Pushed into Dockerhub Repository & Deploying into K8 cluster')
+  }
+
+  agent any
+
+  tools {
+    maven "maven_3_9_5"
+  }
+
+  options {
+    skipDefaultCheckout(true) // We control checkout manually
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    // Correction: Consider shorter timeouts per stage (e.g., 10–15 minutes for build/test, 5 minutes for scans).NOT 30
+    timeout(time: 30, unit: 'MINUTES')
+    timestamps()
+  }
+
+  environment {
+    // NOTE: use SSH URL for manifest repo (sshagent does not auth HTTPS)
+    REGISTRY = "pratheush"
+    IMAGE_NAME = "spring-taskapp-jenkins-k8-cicd"
+    DOCKER_IMAGE_NAME = "${REGISTRY}/${IMAGE_NAME}"
+    DOCKER_CREDENTIALS_ID = 'dockerhub-uname-pwd-token'
+    SONAR_TOKEN = credentials('jenkins-sonarqube-token')
+
+    // Provide SSH remote URL (only one). Make sure credential id 'github-ssh-key' exists in Jenkins.
+    MANIFEST_REPO = "git@github.com:Pratheush/spring-taskapp-k8-manifests.git"
+    MANIFEST_REPO_DIR = "manifests"
+    DEPLOYMENT_FILE = "task-deployment.yaml"
+  }
+
+  triggers {
+    githubPush()
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        echo '📦 Checking out source code...'
+        // Checkout application repo (https ok for main app)
+        git branch: 'main', url: 'https://github.com/Pratheush/complete-production-k81.git'
+        script {
+          env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+          echo "Detected short commit: ${env.GIT_COMMIT_SHORT}"
+          env.IMAGE_FULL = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+        }
+      }
+    }
+
+    stage('Trivy Scan - Filesystem - Maven Dependencies') {
+      steps {
+        script {
+          echo "🔍 Trivy Scan for Maven Dependencies (Filesystem)..."
+          sh "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl > html.tpl"
+          sh "trivy fs --exit-code 1 --severity HIGH,CRITICAL --no-progress --pkg-types library --format template --template \"@html.tpl\" -o report-trivy-fs.html ."
+          publishHTML([
+            reportDir: '.',
+            reportFiles: 'report-trivy-fs.html',
+            reportName: 'Trivy Filesystem Maven Dependency Scan Security-Report'
+          ])
+        }
+      }
+    }
+
+    stage('Build & Test App') {
+      steps {
+        echo '🛠️ Building Spring Boot application with Maven...'
+        sh 'mvn clean verify'
+      }
+    }
+
+    stage('SonarQube Analysis') {
+      steps {
+        echo 'Going to Run static code analysis SpringBoot Application'
+        withSonarQubeEnv(installationName: 'sonarqube') {
+          sh 'mvn sonar:sonar -Dsonar.token=$SONAR_TOKEN -Dsonar.projectKey=spring-taskapp-jenkins-k8-cicd-projectKey -Dsonar.projectName=spring-taskapp-jenkins-k8-cicd-projectName -Dsonar.projectVersion=1.0 -Dsonar.host.url=http://localhost:9000 -Dsonar.junit.reportPaths=target/surefire-reports,target/failsafe-reports -Dsonar.coverage.jacoco.xmlReportPaths=target/jacoco-report/jacoco.xml'
+        }
+      }
+    }
+
+    stage("Quality Gate") {
+      steps {
+        echo 'Quality Gate PASS/FAIL CHECK'
+        echo '⏳ Waiting for SonarQube Quality Gate (timeout 5m)'
+        timeout(time: 5, unit: 'MINUTES') {
+          // This will fail the pipeline if gate is failed
+          waitForQualityGate abortPipeline: true
+        }
+      }
+    }
+
+    // using latest in production considered as bad practice.
+    // docker tag ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} ${env.REGISTRY}/${env.IMAGE_NAME}:latest
+    stage('Build Docker Image') {
+      steps {
+        echo '🐳 Building Docker image...(tagged with commit sha and latest)'
+        script {
+          sh """
+            docker build -t ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} .
+          """
+          env.IMAGE_FULL = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+          echo "✅ Built image: ${env.IMAGE_FULL} and tagged as latest"
+        }
+      }
+    }
+
+    stage('Trivy Scan - Docker Image') {
+      steps {
+        script {
+          echo "🔍 Trivy Scan Docker Image Built For Vulnerabilities..."
+          sh "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl > html.tpl"
+          sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress --format template --template \"@html.tpl\" -o report-trivy-docker-image-latest.html ${env.IMAGE_FULL}"
+          publishHTML([
+            reportDir: '.',
+            reportFiles: 'report-trivy-docker-image-latest.html',
+            reportName: 'Trivy Final DockerImage Scan Security-Report'
+          ])
+        }
+      }
+    }
+
+    // using latest in production considered as bad practice.
+    // docker push ${env.REGISTRY}/${env.IMAGE_NAME}:latest
+    stage('Push Docker Image to DockerHub') {
+      steps {
+        echo '🚀 Pushing Docker image...'
+        withCredentials([usernamePassword(credentialsId: DOCKER_CREDENTIALS_ID,
+                                          usernameVariable: 'DOCKER_USER',
+                                          passwordVariable: 'DOCKER_PASS')]) {
+          retry(3) {
+            sh """
+              echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+              docker push ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}
+            """
+          }
+        }
+        echo "🚀 Docker image ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} pushed to DockerHub successfully!"
+      }
+    }
+
+    // masking errors with || true IS ACCEPTABLE in cleanup stages
+    // BUT MASKING ERRORS No, in critical stages (like build, test, push, manifest update) masking errors would be dangerous because you’d miss real failures
+    // Example: git commit ... || true → dangerous, because you’d miss commit failures.
+    // Example: docker push ... || true → dangerous, because you’d miss push failures.
+    // replace || true with explicit checks or try/catch so you log the reason instead of silently ignoring it.
+    // Silently ignores all errors (image not found, permission denied, daemon not running, etc.)
+    // Jenkins will never know if something genuinely went wrong. Pipeline logs don’t explain why cleanup was skipped.
+    stage('Clean Docker Images (optional)') {
+      when {
+        expression { params.CLEANUP_ENABLED }
+      }
+      steps {
+        echo "🧹 Cleaning up local Docker images as cleanup is enabled..."
+        script {
+          // Best-effort remove (do not fail the build on rmi error)
+          // sh "docker rmi ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} || true"
+          // sh "docker rmi ${env.REGISTRY}/${env.IMAGE_NAME}:latest || true"
+          try {
+                sh "docker rmi ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+          } catch (Exception e) {
+                echo "Image not found or in use, skipping cleanup."
+                echo "Cleanup skipped: ${e.getMessage()}"
+          }
+
+        }
+      }
+    }
+
+    // -------------------------
+    // GitOps Manifest Update Stage
+    // -------------------------
+    stage('Trigger ManifestUpdate (GitOps)') {
+      steps {
+        script {
+          echo "===== Starting Manifest Update Stage ====="
+          try {
+            // use sshagent with the Jenkins credential that has write access to the manifest repo
+            sshagent(['github-ssh-key']) {
+
+              // detect default branch of manifest repo, fallback to main
+              def targetBranch = sh(script: "git ls-remote --symref ${MANIFEST_REPO} HEAD 2>/dev/null | sed -n 's@^ref: refs/heads/@@p' | head -n1 || echo main", returnStdout: true).trim()
+              if (!targetBranch) { targetBranch = 'main' }
+              echo "Detected target branch: ${targetBranch}"
+
+            // Retry backoff retry(3) is good, but Jenkins retries immediately. For robustness, consider adding sleep/backoff between retries (especially for git clone).
+            //   retry(3) {
+            //      sh """
+            //         rm -rf ${MANIFEST_REPO_DIR}
+            //         git clone -b ${targetBranch} ${MANIFEST_REPO} ${MANIFEST_REPO_DIR}
+            //      """
+            //   }
+
+        
+            int attempts = 0
+            int maxAttempts = 3
+            while (attempts < maxAttempts) {
+            try {
+                sh """
+                rm -rf ${MANIFEST_REPO_DIR}
+                git clone -b ${targetBranch} ${MANIFEST_REPO} ${MANIFEST_REPO_DIR}
+                """
+                break  // success → exit loop
+            } catch (Exception e) {
+                attempts++
+                if (attempts >= maxAttempts) {
+                error "❌ Git clone failed after ${maxAttempts} attempts"
+                }
+                echo "⚠️ Git clone failed (attempt ${attempts}), retrying in 10s..."
+                sleep 10  // backoff before retry
+            }
+            }
+
+              dir("${MANIFEST_REPO_DIR}") {
+                // ensure remote url is SSH (safe) This COMMAND tries to reset the Git remote URL to your manifest repo (SSH form). The || true means: if the command fails, ignore the error and continue.
+                // Running git remote set-url multiple times doesn’t harm anything. Failure usually means “nothing to change” rather than a real error. don’t want the whole pipeline to fail bcoz of failure at here
+
+
+                sh "git remote set-url origin ${MANIFEST_REPO} || true"
+
+                // set git identity for automated commit
+                sh """
+                  git config user.email "jenkins@company.com"
+                  git config user.name "Jenkins CI"
+                """
+
+                // Update image fields in any yaml that contains 'image:'
+                // sh """
+                //   echo "Updating image fields to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+                //   # iterate files that contain 'image:' (safe-guard with || true)
+                //   for f in \$(grep -RIl \"^\\s*image:\\s*\" --exclude-dir=.git . || true); do
+                //     echo "Updating \$f"
+                //     # Replace the image value while keeping whitespace indentation
+                //     sed -i.bak -E \"s|(^[[:space:]]*image:[[:space:]]*)([^[:space:]]+)|\\1${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}|g\" \"\$f\"
+                //   done
+                // """
+                
+                // So even if multiple containers exist, only the intended one is updated.
+                // Update image fields in any yaml that contains 'image:'
+                // To make it production‑safe, filter by container name. in multi-container pod
+                // || true is attached to the grep command. That means: if grep finds nothing (exit code 1), don’t fail the pipeline — just continue with an empty list.
+                // Running this loop when there are no matching files should simply do nothing. this ensures the pipeline doesn’t break unnecessarily
+                // For production readability, you can replace || true with an explicit check and log message, but functionally both are safe.
+                // "grep -RIl "image:" --exclude-dir=.git ."" :: current search is too broad. It will happily catch any YAML file that has an image: field — including CronJobs, Jobs, DaemonSets etc
+                // Multi‑resource repos often contain more than just Deployments Updating all image: fields blindly can break
+                // Narrow search to Deployments
+                // "FILES=$(grep -RIl "kind: Deployment" --include="*deployment*.yaml" --exclude-dir=.git . || true)" :: Targets only files with “deployment”.Useful if your repo follows naming conventions like task-deployment.yaml
+
+                // sh """
+                //   echo "Updating image fields to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+                //   # iterate files that contain 'image:' (safe-guard with || true)
+                //   FILES=$(grep -RIl "image:" --exclude-dir=.git . || true)
+                //   if [ -z "$FILES" ]; then
+                //         echo "No files with image: found, skipping update."
+                //   else
+                //         for f in $FILES; do
+                //             echo "Updating $f"
+                //             yq e -i '(.spec.template.spec.containers[] | select(.name == "task-app") | .image) = "'${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}'"' "$f"
+                //         done
+                //   fi
+                //  """
+
+                // grep "image:" is too broad → catches any YAML with an image: field.
+                // yq understands YAML structure → you can check .kind and only update Deployment manifests
+                sh """
+                    echo "Updating image fields to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+
+                    # Iterate over YAML files (excluding .git directory) lists all YAML files except .git
+                    for f in \$(find . -name "*.yaml" -not -path "./.git/*"); do
+                    # Check if the resource kind is Deployment. extracts the kind field from the YAML only proceed if it’s a Deployment.
+                    if yq e '.kind' "\$f" | grep -q "Deployment"; then
+                        echo "Updating \$f"
+                        # Update only the container named 'task-app': "yq e -i" > edits the file in place.
+                        echo "finds the container named task-app and updates its image Sets it to : ${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+                        yq e -i '(.spec.template.spec.containers[] 
+                                | select(.name == "task-app") 
+                                | .image) = "'${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}'"' "\$f"
+                    fi
+                    done
+                """
+
+                
+
+                // check for changes
+                def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
+                if (!changes) {
+                  echo "No manifest changes detected. Skipping commit/PR."
+                } else {
+                  def prBranch = "update-image-${env.GIT_COMMIT_SHORT}"
+                  sh "git checkout -b ${prBranch}"
+                  sh "git add -A"
+                  // The || true means “if commit fails, ignore it and continue.” That masks errors — for example, if Git fails because of permissions, or if there are staged changes but commit fails, Jenkins will still continue as if nothing happened.
+                  //sh "git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)' || true"
+                  // git diff --cached --quiet checks whether there are staged changes If there are staged changes, then run the commit.If there are no staged changes, skip commit.
+                  sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
+                  sh "git push --set-upstream origin ${prBranch}"
+
+                  echo "Branch ${prBranch} pushed successfully."
+
+                  // Attempt to create PR using gh CLI if available
+                  def ghExists = sh(script: "which gh >/dev/null 2>&1 && echo true || echo false", returnStdout: true).trim()
+                  if (ghExists == 'true') {
+                     def repoName = sh(script: "git config --get remote.origin.url | sed -E 's#(git@|https://)github.com[:/]##; s#.git##'",returnStdout: true).trim()
+                    sh """
+                      gh pr create --repo ${repoName} --head ${prBranch} --base ${targetBranch} --title "chore: update image ${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}" --body "Automated manifest update by Jenkins (${env.BUILD_URL})"
+                    """
+                    echo "Pull Request created for branch ${prBranch} in repo ${repoName}."
+                  } else {
+                    echo "⚠️ gh CLI not installed in agent. Branch pushed, please create PR manually or install gh CLI."
+                  }
+                } // end if changes
+              } // end dir
+            } // end sshagent
+          } catch (Exception e) {
+            echo "❌ Manifest update failed: ${e.message}"
+            // Mark build unstable but continue to post actions
+            currentBuild.result = 'UNSTABLE'
+            throw e
+          }
+          echo "===== Manifest Update Completed (or skipped) ====="
+        } // end script
+      } // end steps
+    } // end stage Trigger ManifestUpdate
+
+  } // end stages
+
+  // docker logout WE CAN ADD LOGOUT RIGHT AFTER PUSH INSIDE THE SCRIPT
+  post {
+    always {
+      sh 'docker logout || true'  
+      echo '🧾 Archiving reports and test results'
+      junit allowEmptyResults: true, testResults: '**/surefire-reports/*.xml, **/failsafe-reports/*.xml'
+      recordCoverage(tools: [[parser: 'JACOCO', pattern: 'target/jacoco-report/jacoco.xml']], sourceDirectories: [[path: 'src/main/java']])
+      archiveArtifacts artifacts: 'report-*.html', allowEmptyArchive: true
+      echo "🏁 Cleaning Workspace."
+      cleanWs()
+      echo "🏁 Pipeline execution finished."
+    }
+    success {
+      echo '✅ Pipeline executed successfully.'
+      echo '🚀 Docker image successfully built and pushed!'
+    }
+    unstable {
+      echo "⚠️ Build is unstable - check warnings/quality gates"
+    }
+    failure {
+      echo "❌ CI/CD Pipeline failed! See console log for details."
+    }
+  }
+}

@@ -1,0 +1,174 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-app-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: task-app
+  template:
+    metadata:
+      labels:
+        app: task-app
+    spec:
+      containers:
+        - name: task-app
+          image: spring-taskapp-jenkins-k8-cicd:01
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 9393
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 9393
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 9393
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests:
+              memory: "350Mi"
+              cpu: "250m"
+            limits:
+              memory: "500Mi"
+              cpu: "500m"
+---
+# Purpose: Provides stable networking to access pods.
+# Used by the Ingress to route traffic into the Deployment.
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-app-service
+spec:
+  selector:
+    app: task-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 9393
+---
+# Purpose: ACME issuer to request Let's Encrypt TLS certificates.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: production-app
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: demo@v1.com
+    privateKeySecretRef:
+      name: app
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+---
+# Purpose: Request TLS certificate for the domain.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: app
+spec:
+  secretName: app
+  issuerRef:
+    name: production-app
+    kind: ClusterIssuer
+  commonName: demo.kubesimplify.com
+  dnsNames:
+    - demo.kubesimplify.com
+---
+# Purpose: Expose the application to the internet using HTTP/HTTPS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: task-app-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: production-app
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: demo.kubesimplify.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: task-app-service
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - demo.kubesimplify.com
+      secretName: app
+---
+✅ This file is:
+✔ Valid Kubernetes YAML
+✔ Proper indentation and structure
+✔ Includes Deployment + Service + ClusterIssuer + Certificate + Ingress
+✔ Matches your exact example
+✔ Ready for GitOps / ArgoCD / kubectl apply
+👉 Want me to also create?
+
+✅ task-app-configmap.yaml
+✅ task-app-secret.yaml
+✅ HorizontalPodAutoscaler (HPA)
+✅ Namespace file
+✅ Production ingress with rewrite rules
+✅ Combined kustomize folder structure
+
+Just tell me "generate full manifest set".
+
+
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: task-app-hpa
+  namespace: default
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: task-app-deployment
+
+  minReplicas: 1
+  maxReplicas: 5
+
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 20
+
+    # Optional memory-based autoscaling (uncomment if needed)
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 50
+---
+📌 How this HPA works
+✔ Automatically increases pods when CPU > 50%
+
+Example:
+If each pod is allowed 250m CPU, and usage exceeds 125m, scaling triggers.
+
+✔ Automatically decreases pods when traffic is low
+
+Downscales safely (won’t go below 1 pod).
+
+✔ Uses Kubernetes Metrics Server
+
+Make sure you have: : kubectl get deployment metrics-server -n kube-system
+
+1️⃣ Add HPA to your GitOps repo (formatted for ArgoCD)?
+2️⃣ Add Kustomize overlays (dev / staging / prod)?
+3️⃣ Add Prometheus alerts for HPA scaling?

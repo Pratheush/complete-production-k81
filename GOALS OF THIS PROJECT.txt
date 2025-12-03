@@ -1,0 +1,34 @@
+
+
+add git generated personal access token  from git into jenkins credentials (username with passwords)
+add sonar token to jenkins credentials (username with passwords)
+dockerhub token to jenkins credentials (username with passwords)
+
+GOALS::
+
+understand this last stage : checked
+
+ready jenkinsfile
+
+check trivy and sonar setup for integration with jenkins working ?? so check earlier builds in jenkins project inside jenkins and look for global and system variable for passwords and tokens set and review them for new project.
+
+In SonarQube, configure a Quality Gate , Add a webhook in SonarQube to notify Jenkins of pass/fail status
+
+check my jenkinsfile if its production ready
+
+then
+two github repositories checked
+
+deploy into jenkinsfile
+
+first using ingress
+
+use k6 and request 300 to check for horizontal autoscaling
+
+prometheus and grafana
+
+change into kubernetes api gateway
+
+modify application to store task into database : use cloudnativepg operator in deployment yaml file then try blue-green canary deployment
+
+prometheus and grafana

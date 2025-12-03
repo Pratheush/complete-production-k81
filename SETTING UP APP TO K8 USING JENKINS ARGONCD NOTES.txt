@@ -1,0 +1,392 @@
+
+Example :
+```
+# Purpose: ACME issuer to request Let's Encrypt TLS certificates.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: production-app
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: demo@v1.com
+    privateKeySecretRef:
+      name: app
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+---
+# Purpose: Request TLS certificate for the domain.
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: app
+spec:
+  secretName: app
+  issuerRef:
+    name: production-app
+    kind: ClusterIssuer
+  commonName: demo.kubesimplify.com
+  dnsNames:
+    - demo.kubesimplify.com
+---
+# Purpose: Expose the application to the internet using HTTP/HTTPS.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: task-app-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: production-app
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: demo.kubesimplify.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: task-app-service
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - demo.kubesimplify.com
+      secretName: app
+
+```
+
+
+✅ 1. ClusterIssuer — “The Person Who Gives You Certificates”
+
+📌 What it is ClusterIssuer
+A ClusterIssuer is like a certificate provider inside your Kubernetes cluster.
+
+It tells Kubernetes:
+“When I need an HTTPS certificate, go to Let’s Encrypt,
+and request it using this email, this server, and validate through NGINX Ingress.”
+
+📌 Why it's needed
+Without it, Kubernetes cannot get free SSL/TLS certificates from Let’s Encrypt.
+
+📌 Where it is used
+It is not used by your application directly.
+It is used by cert-manager + Ingress to create HTTPS certs.
+
+Install CERT MANAGER
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.14.5/cert-manager.yaml
+
+Install Metrics server
+kubectl apply -f https://github.com/kubernetes-sigs/metrics-server/releases/latest/download/components.yaml
+
+
+📌 How it works (simple example)
+Think of Issuer as a passport office.
+
+You say: I want a passport (TLS certificate).
+
+Issuer replies: Ok, I will request it from Let’s Encrypt, verify it, and then give you the passport (certificate).
+
+example :
+kind: ClusterIssuer
+metadata:
+  name: production-app
+
+This means:
+“A global (cluster-wide) certificate provider named production-app.”
+
+
+✅ 2. Certificate — “The Actual SSL Certificate You Are Asking For”
+📌 What it is
+A Certificate resource requests an actual SSL certificate for a domain.
+
+from above example : demo.kubesimplify.com
+
+
+📌 Where it is used
+It is used by the Ingress to serve HTTPS.
+
+📌 How it works (simple example)
+
+Think of Certificate as your application asking for a passport:
+
+“Hey ClusterIssuer, please create a certificate for my domain
+demo.kubesimplify.com
+and store it in a secret named app.”
+
+The ClusterIssuer then goes to Let’s Encrypt, validates the domain, and stores certificate in:
+Secret: app
+
+👉 In YAML:
+spec:
+  secretName: app
+  issuerRef:
+    name: production-app
+
+This means:
+Store the generated certificate in a Kubernetes secret named app,
+signed by the ClusterIssuer production-app.
+
+Your Ingress will use this secret to enable HTTPS.
+
+
+
+🔒 3. How These Two Are Used in Your Deployment
+Your Deployment does NOT directly use these objects.
+
+Your Ingress uses them to enable HTTPS.
+
+Flow:
+
+1️⃣ ClusterIssuer
+Tells Kubernetes how to talk to Let’s Encrypt.
+
+2️⃣ Certificate
+Requests a certificate for demo.kubesimplify.com.
+
+3️⃣ cert-manager
+Contacts Let’s Encrypt → validates → gets the cert → stores in secret.
+
+4️⃣ Ingress
+Uses:
+tls:
+  - hosts:
+      - demo.kubesimplify.com
+    secretName: app
+
+This secret was created by the Certificate.
+
+5️⃣ Browser sees HTTPS is secure
+
+
+Imagine your app is reachable at: http://demo.kubesimplify.com
+But you want: https://demo.kubesimplify.com   (secure)
+
+Step-by-step:
+
+Step 1 — ClusterIssuer
+ClusterIssuer tells cert-manager:
+“Use Let’s Encrypt to get certificates when someone requests one.”
+
+Step 2 — Certificate
+Certificate says:
+“I need an SSL certificate for demo.kubesimplify.com.”
+
+Step 3 — Validation
+Let’s Encrypt checks domain ownership using NGINX Ingress (HTTP-01 challenge).
+
+Step 4 — cert-manager stores cert in Secret
+Certificate is stored inside: Secret: app
+
+Step 5 — Ingress uses certificate
+Your Ingress config references that secret: secretName: app
+
+Now HTTPS works.
+
+
+🔗 5. How It Fits into Your Jenkins File + GitOps Pipeline
+✔ Jenkins builds app → builds docker image
+✔ Jenkins updates manifest repo with new image tag
+✔ ArgoCD notices change → deploys updated Deployment
+✔ Ingress stays same but continues using TLS certificate
+✔ cert-manager renews certificate automatically (every 60–90 days)
+
+No changes needed in Jenkins —
+cert-manager handles SSL automatically.
+
+
+🧠 Why This Is Important
+Without ClusterIssuer + Certificate
+
+❌ Your domain won't have HTTPS
+❌ Browsers show “Not Secure”
+❌ Some APIs won’t work
+❌ OAuth2 / JWT redirects break
+❌ Production websites are insecure
+
+With ClusterIssuer + Certificate
+
+✅ Automatic Let’s Encrypt HTTPS
+✅ Automatic renewal
+✅ No manual certificate installation
+✅ Secure production-ready traffic
+✅ Fully GitOps automated
+
+
+✅ Does the Certificate store the generated certificate?
+Not directly.The Certificate object does NOT store the certificate inside itself. It tells cert-manager where to store the
+certificate.
+That location is: ✔ The Kubernetes Secret mentioned in: secretName: app
+So cert-manager will create a Secret:
+And inside that Secret cert-manager will store:
+tls.crt → The actual TLS certificate
+tls.key → The private key
+ca.crt → (Sometimes) CA certificate
+
+
+2️⃣ Secret (created automatically)
+This is the actual storage:
+apiVersion: v1
+kind: Secret
+metadata:
+  name: app
+type: kubernetes.io/tls
+data:
+  tls.crt: <base64 encoded certificate>
+  tls.key: <base64 private key>
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+Here is a complete, working Kubernetes setup using nip.io, fully compatible with your Jenkins CI/CD pipeline — NO domain needed, NO HTTPS, NO cert-manager, ONLY Ingress + LoadBalancer + nip.io auto-DNS.
+
+✅ COMPLETE FREE SETUP USING nip.io (NO HTTPS)
+You only need:
+Kubernetes cluster
+Ingress-NGINX installed
+LoadBalancer external IP
+nip.io to auto-resolve domain
+
+
+
+argocd :::
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+kubectl port-forward [resource] [LOCAL_PORT:]REMOTE_PORT
+
+kubectl port-forward svc/argocd-server -n argocd 9090:443
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

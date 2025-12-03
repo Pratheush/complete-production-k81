@@ -1,0 +1,261 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-app-deployment
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: task-app
+  template:
+    metadata:
+      labels:
+        app: task-app
+    spec:
+      containers:
+      - name: task-app
+        image: spring-taskapp-jenkins-k8-cicd:01
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9393
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9393
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9393
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        resources:
+          requests:
+            memory: "350Mi"
+            cpu: "250m"
+          limits:
+            memory: "500Mi"
+            cpu: "500m"
+
+---
+# Purpose: Provides stable networking to access pods.
+# Connects external traffic to the Deployment pods.
+# Will be used by the Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-app-service
+spec:
+  selector:
+    app: task-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 9393
+---
+#Purpose: Defines how TLS certificates are obtained (from Let’s Encrypt).
+# Will be used by the Certificate object to issue TLS certs.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: production-app
+spec:
+  acme:
+    # The ACME server URL : server → ACME endpoint (Let’s Encrypt).
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # Email address used for ACME registration
+    email: demo@v1.com : email → Used for registration.
+    # privateKeySecretRef → Stores ACME account key.
+    privateKeySecretRef:
+    # Name of a secret used to store the ACME account private key
+      name: app
+    # Enable the HTTP-01 challenge provider : http01.ingress.class: nginx → Uses NGINX ingress for validation.
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+---
+# Purpose: Requests a TLS certificate for your domain.
+# Certificate is stored in a Secret (app) used by the Ingress
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: app
+spec:
+  # secretName: app → Stores the issued certificate.
+  secretName: app
+  # issuerRef → Refers to the ClusterIssuer (production-app).
+  issuerRef:
+    name: production-app
+    kind: ClusterIssuer
+  commonName: demo.kubesimplify.com
+  # dnsNames → Domain names for the certificate.
+  dnsNames:
+  - demo.kubesimplify.com
+---
+# Purpose: Routes external HTTP(S) traffic into the cluster.
+# Uses Service to reach pods.
+# Uses Certificate Secret (app) for HTTPS.
+# Tied to ClusterIssuer via annotation.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: task-app-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: production-app
+
+spec:
+  ingressClassName: nginx
+  # rules.host: demo.kubesimplify.com → Domain name.
+  rules:
+  - host: demo.kubesimplify.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        # backend.service.name: my-app-service → Routes traffic to the Service.
+        backend:
+          service:
+            name: task-app-service
+            port:
+              number: 80
+  # tls.secretName: app → Uses TLS cert stored in Secret (from Certificate).
+  tls:
+  - hosts:
+    - demo.kubesimplify.com
+    secretName: app
+
+
+
+# 🔗 How They All Connect
+# Here’s the flow:
+# 1. Deployment → Runs pods with app + DB connection.
+# 2. Service → Exposes pods internally on port 80.
+# 3. Ingress → Maps external domain (demo.kubesimplify.com) to the Service.
+# 4. ClusterIssuer + Certificate → Automates TLS cert issuance from Let’s Encrypt.
+# 5. Secret (DB) → Provides secure DB credentials to the app.
+# 6. Secret (TLS) → Stores issued TLS cert for HTTPS traffic.
+
+
+
+# 🧩 Why These Objects Are Used
+# 1. Deployment → Ensures app runs reliably and can scale.
+# 2. Service → Provides stable networking to pods.
+# 3. Ingress → Exposes app to the internet with domain + HTTPS.
+# 4. ClusterIssuer/Certificate → Automates SSL/TLS for secure traffic.
+# 5. Secret → Protects sensitive data (DB creds, TLS certs).
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

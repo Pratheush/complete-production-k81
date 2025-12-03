@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<link rel="stylesheet" th:href="@{/style.css}">
+<head>
+    <title>Task Manager</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; }
+        .task-box { margin: 20px auto; }
+        .task-list { margin-top: 30px; }
+        .task-item { margin: 10px; }
+        button { margin-left: 10px; }
+    </style>
+</head>
+<body>
+<h1>Task Manager</h1>
+
+<!-- Add Task Form -->
+<div class="task-box">
+    <form action="/add" method="post">
+        <input type="text" name="taskName" placeholder="Enter task" required>
+        <button type="submit">Add Task</button>
+    </form>
+</div>
+
+<!-- Task List -->
+<div class="task-list">
+    <h2>Tasks</h2>
+    <ul>
+        <li th:each="task, iterStat : ${tasks}" class="task-item">
+            <span th:text="${task.name}"></span>
+            <form action="/delete" method="post" style="display:inline;">
+                <input type="hidden" name="index" th:value="${iterStat.index}">
+                <button type="submit">Delete</button>
+            </form>
+        </li>
+    </ul>
+</div>
+</body>
+</html>

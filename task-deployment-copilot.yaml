@@ -1,0 +1,123 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: task-app-deployment
+  labels:
+    app: task-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: task-app
+  template:
+    metadata:
+      labels:
+        app: task-app
+    spec:
+      containers:
+      - name: task-app
+        image: pratheush/spring-taskapp-jenkins-k8-cicd:01   # Replace with your registry + SHA tag
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 9393
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 9393
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 9393
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        resources:
+          requests:
+            memory: "350Mi"
+            cpu: "250m"
+          limits:
+            memory: "500Mi"
+            cpu: "500m"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: task-app-service
+  labels:
+    app: task-app
+spec:
+  selector:
+    app: task-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 9393
+
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: production-app
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: demo@v1.com
+    privateKeySecretRef:
+      name: app
+    solvers:
+    - http01:
+        ingress:
+          class: nginx
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: app
+spec:
+  secretName: app
+  issuerRef:
+    name: production-app
+    kind: ClusterIssuer
+  commonName: demo.kubesimplify.com
+  dnsNames:
+  - demo.kubesimplify.com
+
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: task-app-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: production-app
+spec:
+  ingressClassName: nginx
+  rules:
+  - host: demo.kubesimplify.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: task-app-service
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - demo.kubesimplify.com
+    secretName: app
+
+
+
+----
+🔎 Key Notes
+Image field → replace spring-taskapp-jenkins-k8-cicd:01 with your CI/CD‑built SHA tag (${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}).
+
+ClusterIssuer → configured for Let’s Encrypt production endpoint.
+
+Certificate → requests TLS cert for demo.kubesimplify.com, stored in Secret app.
+
+Ingress → routes traffic to task-app-service, uses TLS cert from Secret.

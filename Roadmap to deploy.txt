@@ -1,0 +1,94 @@
+
+ROADMAP :::
+
+F — GitHub → Jenkins trigger (Webhook)
+
+Two ways:
+
+Install the GitHub plugin and configure Jenkins as a GitHub App; or
+
+Add a webhook in GitHub that posts to Jenkins http://<jenkins-host>/github-webhook/ (or the specific endpoint for the plugin). See plugin docs for details.
+Jenkins Plugins
++1
+
+Quick GitHub webhook steps:
+
+Repo → Settings → Webhooks → Add webhook
+
+Payload URL: http://<jenkins-host>/github-webhook/
+
+Content type: application/json
+
+Choose the events (e.g., push)
+
+In Jenkins, enable GitHub hooks in the job configuration (or use Multibranch Pipeline).
+
+G — Argo CD setup (brief)
+
+Add the manifests Git repository to Argo CD (UI or argocd repo add <repo>). Argo CD will watch it.
+argo-cd.readthedocs.io
++1
+
+Create an Argo CD Application that points to the folder in the manifests repo and to the cluster/namespace. Whenever Jenkins pushes a change to the manifests repo, Argo CD will detect it and sync (depending on auto-sync settings).
+
+Example with CLI:
+
+argocd repo add git@github.com:yourorg/manifests.git --ssh-private-key-path ~/.ssh/id_rsa
+argocd app create myapp \
+  --repo git@github.com:yourorg/manifests.git \
+  --path k8s \
+  --dest-server https://kubernetes.default.svc \
+  --dest-namespace my-namespace
+# Optionally enable auto-sync:
+argocd app set myapp --sync-policy automated
+
+Security / Best practices
+
+Do not store private keys in source repos. Use Jenkins Credentials store.
+
+Protect Jenkins endpoint (use HTTPS, and restrict access).
+
+For the Sonar token and Docker Hub creds, use Jenkins credentials (secret text / username-password).
+
+Prefer using short commit hash image tags (as above) and keep latest as optional.
+
+For manifest edits, prefer using yq or a templating tool (Helm/Kustomize) for safer updates instead of fragile sed replacement.
+
+Rotate tokens periodically.
+Sonar Documentation
++1
+
+Troubleshooting tips
+
+If Jenkins cannot reach SonarQube at localhost:9000, check network: Jenkins inside WSL and Sonar in Docker may need host.docker.internal or proper networking. If Jenkins runs as a system service in WSL and Sonar is a docker container in the same WSL distro, http://sonarqube:9000 may work if you run them in the same compose network; otherwise use http://host.docker.internal:9000 or the actual IP. (Networking differences are common in WSL/Docker setups.)
+Docker Documentation
+
+Quick checklist you can follow now
+
+Ensure Docker Desktop + WSL integration working. docker ps.
+Docker Documentation
+
+Start SonarQube with the sample docker-compose-sonar.yml. Visit http://localhost:9000. Create token.
+Sonar Documentation
+
+Add Sonar token, Docker Hub creds, manifest SSH key to Jenkins Credentials.
+
+Add webhook in GitHub repo to Jenkins or configure GitHub App integration.
+Jenkins Plugins
++1
+
+Add the sample Jenkinsfile to your app repo and change credential IDs & variables.
+
+Configure Argo CD to watch the manifests repo and enable auto-sync for your app.
+GitHub
++1
+
+If you want, I can do one of these next (pick one and I’ll give exact commands & files):
+
+A. Produce a ready-to-run docker-compose.yml and Jenkinsfile tuned for your environment (I’ll assume Jenkins is running in WSL and Docker Desktop is present).
+
+B. Generate a robust update-manifest script that uses yq to update the image tag (safer than sed).
+
+C. Show exact Jenkins job configuration steps for credentials and webhook setup (screenshots/text).
+
+Which one shall I produce right now?
