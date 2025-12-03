@@ -259,6 +259,20 @@ kubectl port-forward [resource] [LOCAL_PORT:]REMOTE_PORT
 kubectl port-forward svc/argocd-server -n argocd 9090:443
 
 
+using ngrok :
+since jenkins running on 8080 port so run ngrok command on ubuntu terminal where jenkins is running as service
+ngrok http 8080
+output will give something like this :::  https://bfab2131b3c4.ngrok-free.app
+
+before adding into github append above linke with : "/github-webhook/"
+
+SO NOW LINK Will BE LIKE THIS : https://bfab2131b3c4.ngrok-free.app/github-webhook/
+https://4bd4873f84dd.ngrok-free.app/github-webhook/
+
+
+sonarqube-jenkins webhook :
+https://4bd4873f84dd.ngrok-free.app/sonarqube-webhook/
+https://bfab2131b3c4.ngrok-free.app/sonarqube-webhook/
 
 
 
