@@ -184,7 +184,7 @@ pipeline {
               // detect default branch of manifest repo, fallback to main
               def targetBranch = sh(
                   script: """
-                      git ls-remote --symref ${MANIFEST_REPO} HEAD 2>/dev/null \
+                      git ls-remote --symref ${env.MANIFEST_REPO} HEAD 2>/dev/null \
                       | awk '/^ref:/ {print \$2}' \
                       | sed 's@refs/heads/@@' \
                       | head -n1
