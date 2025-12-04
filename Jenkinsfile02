@@ -182,9 +182,19 @@ pipeline {
             sshagent(['github-ssh-key']) {
 
               // detect default branch of manifest repo, fallback to main
-              def targetBranch = sh(script: "git ls-remote --symref ${MANIFEST_REPO} HEAD 2>/dev/null | sed -n 's@^ref: refs/heads/\([^ ]*\) HEAD$@\1@p' | head -n1 || echo main", returnStdout: true).trim()
-              if (!targetBranch) { targetBranch = 'main' }
+              def targetBranch = sh(
+                  script: """
+                      git ls-remote --symref ${MANIFEST_REPO} HEAD 2>/dev/null \
+                      | awk '/^ref:/ {print \$2}' \
+                      | sed 's@refs/heads/@@' \
+                      | head -n1
+                  """,
+                  returnStdout: true
+                ).trim()
+
+              if (!targetBranch) targetBranch = 'main'
               echo "Detected target branch: ${targetBranch}"
+
 
             // Retry backoff retry(3) is good, but Jenkins retries immediately. For robustness, consider adding sleep/backoff between retries (especially for git clone).
             //   retry(3) {
