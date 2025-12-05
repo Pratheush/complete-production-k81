@@ -48,7 +48,7 @@ Stage Manifest Update :
             //      """
             //   }
 
-        
+
             int attempts = 0
             int maxAttempts = 3
             while (attempts < maxAttempts) {
@@ -91,7 +91,7 @@ Stage Manifest Update :
                 //     sed -i.bak -E \"s|(^[[:space:]]*image:[[:space:]]*)([^[:space:]]+)|\\1${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}|g\" \"\$f\"
                 //   done
                 // """
-                
+
                 // So even if multiple containers exist, only the intended one is updated.
                 // Update image fields in any yaml that contains 'image:'
                 // To make it production‑safe, filter by container name. in multi-container pod
@@ -135,7 +135,7 @@ Stage Manifest Update :
                 //     fi
                 //     done
                 // """
-                
+
                 // ABOVE UPDATING CODE SNIPPET PROBLEM DISCUSSED DOWN HERE WHICH IS FIXED DOWN BELOW AFTER EXPLANATION ::
                 // the extra template: spec: containers: [] blocks in your Service and Ingress are creating because above code snippet for updating 
                 // my YAML files are multi‑document manifests (Deployment + Service + Ingress in one file)
@@ -166,7 +166,7 @@ Stage Manifest Update :
                 """
 
 
-                
+
 
                 // check for changes
                 def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
@@ -185,7 +185,7 @@ Stage Manifest Update :
                   sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
                   // "git rebase origin/${prBranch} : JUST rebasing with || true is fragile if the branch doesn’t exist remotely yet.
                   // masking errors with || true, but that means if rebase fails, Jenkins will continue silently. That can leave your branch in a detached or conflicted state.
-                  
+
                   // ADDING ABOVE THIS CODE : def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}" WE should NOT use rebase logic
                   // Rebase can fail → repo becomes conflicted → Jenkins stage breaks. || true hides the failure, leaving the git repo corrupted
                   // You do NOT need rebase because your PR branch names are UNIQUE. ✔ Since branch names are unique, your rebase block is useless.
@@ -233,7 +233,6 @@ def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
 if (!changes) {
   echo "No manifest changes detected. Skipping commit/PR."
 }
-
 ```
 
 ✔ Correct  
@@ -248,7 +247,6 @@ No issue here.
 
 ```groovy
 def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}"
-
 ```
 
 ✔ This solves **ALL previous non-fast-forward issues**  
@@ -266,7 +264,6 @@ Perfect.
 sh "git checkout -b ${prBranch}"
 sh "git add -A"
 sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
-
 ```
 
 ### ✔ Why this is correct:
@@ -292,7 +289,6 @@ You correctly removed this block:
 // if git ls-remote --heads origin ${prBranch} | grep ${prBranch}; then
 //   git rebase origin/${prBranch} || true
 // fi
-
 ```
 
 ### ✔ Why removing it is correct:
@@ -335,7 +331,6 @@ if (ghExists == 'true') {
 } else {
   echo "⚠️ gh CLI not installed in agent. Branch pushed, please create PR manually or install gh CLI."
 }
-
 ```
 
 ✔ Works exactly as expected  
@@ -343,8 +338,6 @@ if (ghExists == 'true') {
 ✔ Fallback message if `gh` CLI isn’t installed  
 ✔ Uses correct repo name extraction  
 ✔ No issues here
-
-
 
 ***
 
@@ -359,7 +352,6 @@ yq e -i '
   | select(.name == "task-app")
   | .image = "…"
 ' "$f"
-
 ```
 
 - **Strengths**: concise, directly targets Deployment docs.
@@ -381,7 +373,6 @@ yq e -i '
   else .
   end
 ' "$f"
-
 ```
 
 - **Strengths**:
@@ -394,16 +385,12 @@ yq e -i '
 
 - **Weakness**: slightly more verbose, but safer for multi‑doc YAML.
 
-
-
 ## ✅ Which Is Correct?
 
 - For **single‑document Deployment YAMLs**, both snippets work fine.
 
 - For **multi‑document YAMLs** (Deployment + Service + Ingress in one file, like yours), **ChatGPT’s version is safer**.
   It guarantees that Service and Ingress docs remain intact, avoiding the corruption you saw (`template.spec.containers: []` stubs).
-
-
 
 ### ✅ **YES — This is the correct and safe code.**
 
@@ -431,7 +418,6 @@ sh """
 ' "\$f"
   done
 """
-
 ```
 
 # ✔ WHY THIS VERSION IS CORRECT
@@ -475,7 +461,6 @@ Because `else .` returns the original document untouched, this version preserves
      else .
      end
    )
-
 ```
 
 Updates ONLY the right container even if deployments have multiple containers.
@@ -483,8 +468,6 @@ Updates ONLY the right container even if deployments have multiple containers.
 ### 5️⃣ **Tested and safe for GitOps automation**
 
 This is the recommended pattern for `yq` in production CI/CD pipelines.
-
-
 
 ## ✅ **1. `for f in $(find . -name "*.yaml" -not -path "./.git/*"); do ... done`**
 
@@ -501,8 +484,6 @@ This is the recommended pattern for `yq` in production CI/CD pipelines.
 ### Think of it like:
 
 > “Go through every YAML file in the project (but ignore the .git folder), and do something to each file.”
-
-
 
 ## ✅ **2. `yq e -i '...' "$f"`**
 
@@ -522,8 +503,6 @@ This is the recommended pattern for `yq` in production CI/CD pipelines.
 
 > “Open the YAML file and apply this modification logic directly to it.”
 
-
-
 ## 🧠 Super-simple summary
 
 | Command                 | Meaning                              |
@@ -532,10 +511,6 @@ This is the recommended pattern for `yq` in production CI/CD pipelines.
 | `-not -path "./.git/*"` | Skip the `.git` folder               |
 | `for f in $(...)`       | Loop through each file               |
 | `yq e -i '...' "$f"`    | Edit the YAML file and update fields |
-
-
-
-
 
 # Validate your Jenkinsfile from within VS Code
 
@@ -558,8 +533,37 @@ The extension adds four settings entries to VS Code which you have to use to con
 
 - `jenkins.pipeline.linter.connector.crumbUrl` has to be specified if your Jenkins Server has CRSF protection enabled. Typically this points to *[http://<your_jenkins_server:port>/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb](http://%3Cyour_jenkins_server:port>/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb))*.​
 
-
-
 HOW TO VALIDATE Jenkinsfile using "jenkins-pipeline-linter-connector" extension
 
 ![example1.gif](D:\jlab\git2024\mycicd\cicd-jenkins-argocd-k8\complete-production-k81\example1.gif)
+
+# Validate Jenkinsfile with Curl
+
+Jenkins provides [Pipeline Development Tool](https://www.jenkins.io/doc/book/pipeline/development/) to validate the pipeline Jenkinsfile. There are two ways,
+
+- Use ssh
+- Use rest API
+
+Since ssh to Jenkins server is not a good way, use rest API is good to go.
+
+With curl, we can easily call rest API to validate,
+
+- Create a Jenkins user token
+- Run with curl comamnd
+
+```bash
+curl -k -X POST --user "${USER}:${TOKEN}" -F "jenkinsfile=<Jenkinsfile" "${JENKINS_URL}/pipeline-model-converter/validate"
+```
+
+`curl -k -X POST --user "${USER}:${TOKEN}" -F "jenkinsfile=<Jenkinsfile" "${JENKINS_URL}/pipeline-model-converter/validate"`
+
+If everything is fine, it will output `Jenkinsfile successfully validated.`
+
+If there is any error, it will output like, then fix issue and check again.
+
+```bash
+Errors encountered validating Jenkinsfile:
+WorkflowScript: 95: unexpected token: > @ line 95, column 60.
+   uild && lastBuild.num as long > "${env.B
+                                 ^
+```
