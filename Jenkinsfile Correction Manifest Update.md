@@ -532,3 +532,34 @@ This is the recommended pattern for `yq` in production CI/CD pipelines.
 | `-not -path "./.git/*"` | Skip the `.git` folder               |
 | `for f in $(...)`       | Loop through each file               |
 | `yq e -i '...' "$f"`    | Edit the YAML file and update fields |
+
+
+
+
+
+# Validate your Jenkinsfile from within VS Code
+
+# jenkins-pipeline-linter-connector:
+
+This extension validates Jenkinsfiles by sending them to the Pipeline Linter of a Jenkins server.
+
+## Features
+
+- Validate Jenkinsfiles from wihin vscode.
+- Supports declarative pipeline only.
+
+The extension adds four settings entries to VS Code which you have to use to configure the Jenkins Server you want to use for validation.
+
+- `jenkins.pipeline.linter.connector.url` is the endpoint at which your Jenkins Server expects the POST request, containing your Jenkinsfile which you want to validate. Typically this points to *[http://<your_jenkins_server:port>/pipeline-model-converter/validate](http://%3Cyour_jenkins_server:port>/pipeline-model-converter/validate)*.
+
+- `jenkins.pipeline.linter.connector.user` allows you to specify your Jenkins username.
+
+- `jenkins.pipeline.linter.connector.pass` allows you to specify your Jenkins password.
+
+- `jenkins.pipeline.linter.connector.crumbUrl` has to be specified if your Jenkins Server has CRSF protection enabled. Typically this points to *[http://<your_jenkins_server:port>/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb](http://%3Cyour_jenkins_server:port>/crumbIssuer/api/xml?xpath=concat(//crumbRequestField,%22:%22,//crumb))*.​
+
+
+
+HOW TO VALIDATE Jenkinsfile using "jenkins-pipeline-linter-connector" extension
+
+![example1.gif](D:\jlab\git2024\mycicd\cicd-jenkins-argocd-k8\complete-production-k81\example1.gif)
