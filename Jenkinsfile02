@@ -299,14 +299,28 @@ pipeline {
                 if (!changes) {
                   echo "No manifest changes detected. Skipping commit/PR."
                 } else {
-                  def prBranch = "update-image-${env.GIT_COMMIT_SHORT}"
+                  // If multiple builds run for the same commit, they’ll collide. Rebasing helps, but the cleaner fix is unique branch names per build.
+                  // Therefore No branch conflicts and No need for rebase and No non–fast-forward error and No remote branch with same name
+                  // def prBranch = "update-image-${env.GIT_COMMIT_SHORT}"
+                  def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}"
                   sh "git checkout -b ${prBranch}"
                   sh "git add -A"
                   // The || true means “if commit fails, ignore it and continue.” That masks errors — for example, if Git fails because of permissions, or if there are staged changes but commit fails, Jenkins will still continue as if nothing happened.
                   //sh "git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)' || true"
                   // git diff --cached --quiet checks whether there are staged changes If there are staged changes, then run the commit.If there are no staged changes, skip commit.
                   sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
-                  sh "git push --set-upstream origin ${prBranch}"
+                  // "git rebase origin/${prBranch} : JUST rebasing with || true is fragile if the branch doesn’t exist remotely yet.
+                  // masking errors with || true, but that means if rebase fails, Jenkins will continue silently. That can leave your branch in a detached or conflicted state.
+                  
+                  // ADDING ABOVE THIS CODE : def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}" WE should NOT use rebase logic
+                  // Rebase can fail → repo becomes conflicted → Jenkins stage breaks. || true hides the failure, leaving the git repo corrupted
+                  // You do NOT need rebase because your PR branch names are UNIQUE. ✔ Since branch names are unique, your rebase block is useless.
+                  // git fetch origin ${prBranch} || true
+                  // if git ls-remote --heads origin ${prBranch} | grep ${prBranch}; then
+                  //   git rebase origin/${prBranch} || true
+                  // fi
+
+                 sh "git push --set-upstream origin ${prBranch}"
 
                   echo "Branch ${prBranch} pushed successfully."
 
