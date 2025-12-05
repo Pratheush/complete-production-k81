@@ -24,6 +24,7 @@ pipeline {
     DOCKER_IMAGE_NAME = "${REGISTRY}/${IMAGE_NAME}"
     DOCKER_CREDENTIALS_ID = 'dockerhub-uname-pwd-token'
     SONAR_TOKEN = credentials('jenkins-sonarqube-token')
+    GITHUB_CLI_CREDENTIALS_ID = 'github-cli-token'
 
     // Provide SSH remote URL (only one). Make sure credential id 'github-ssh-key' exists in Jenkins.
     MANIFEST_REPO = "git@github.com:Pratheush/spring-taskapp-k8-manifests.git"
@@ -239,28 +240,44 @@ pipeline {
             // check for changes
             def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
             if (!changes) {
-              echo "No manifest changes detected. Skipping commit/PR."
+            echo "No manifest changes detected. Skipping commit/PR."
             } else {
-              def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}"
-              sh "git checkout -b ${prBranch}"
-              sh "git add -A"
-              sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
-              sh "git push --set-upstream origin ${prBranch}"
+            def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}"
+            sh "git checkout -b ${prBranch}"
+            sh "git add -A"
+            sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
+            sh "git push --set-upstream origin ${prBranch}"
 
-              echo "Branch ${prBranch} pushed successfully."
+            echo "Branch ${prBranch} pushed successfully."
 
-              // Attempt to create PR using gh CLI if available
-              def ghExists = sh(script: "which gh >/dev/null 2>&1 && echo true || echo false", returnStdout: true).trim()
-              if (ghExists == 'true') {
-                def repoName = sh(script: "git config --get remote.origin.url | sed -E 's#(git@|https://)github.com[:/]##; s#.git##'", returnStdout: true).trim()
-                sh """
-                  gh pr create --repo ${repoName} --head ${prBranch} --base ${targetBranch} --title "chore: update image ${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}" --body "Automated manifest update by Jenkins (${env.BUILD_URL})"
-                """
+            // Attempt to create PR using gh CLI if available and authenticated
+            def ghExists = sh(script: "which gh >/dev/null 2>&1 && echo true || echo false", returnStdout: true).trim()
+            if (ghExists == 'true') {
+                def ghAuth = sh(script: "gh auth status >/dev/null 2>&1 && echo true || echo false", returnStdout: true).trim()
+                if (ghAuth == 'true') {
+                def repoName = sh(
+                    script: "git config --get remote.origin.url | sed -E 's#(git@|https://)github.com[:/]##; s#.git##'",
+                    returnStdout: true
+                ).trim()
+
+                // Inject GitHub token from Jenkins credentials
+                withCredentials([string(credentialsId: GITHUB_CLI_CREDENTIALS_ID, variable: 'GH_TOKEN')]) {
+                    sh """
+                    echo \$GH_TOKEN | gh auth login --with-token
+                    gh pr create --repo ${repoName} --head ${prBranch} --base ${targetBranch} \
+                        --title "chore: update image ${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}" \
+                        --body "Automated manifest update by Jenkins (${env.BUILD_URL})"
+                    """
+                }
                 echo "Pull Request created for branch ${prBranch} in repo ${repoName}."
-              } else {
+                } else {
+                echo "⚠️ gh CLI is installed but not authenticated. Branch pushed, please create PR manually."
+                }
+            } else {
                 echo "⚠️ gh CLI not installed in agent. Branch pushed, please create PR manually or install gh CLI."
-              }
+            }
             } // if changes
+
           } // dir
 
         } // sshagent
