@@ -206,17 +206,17 @@ pipeline {
             // ---------------------------------------------------------------------------------------
             // ✔ SAFELY define yq filter in Groovy (No heredoc, no $(cat), no Groovy string issues)
             // ---------------------------------------------------------------------------------------
-            def yqFilter = '''
-if .kind == "Deployment" then
-  .spec.template.spec.containers |= map(
-    if .name == "task-app" then
-      .image = "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
-    else .
-    end
-  )
-else .
-end
-'''
+            def yqFilter = """
+            if .kind == "Deployment" then
+            .spec.template.spec.containers |= map(
+                if .name == "task-app" then
+                .image = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+                else .
+                end
+            )
+            else .
+            end
+            """
 
             // ---------------------------------------------------------------------------------------
             // ✔ Run loop safely and apply yq filter
