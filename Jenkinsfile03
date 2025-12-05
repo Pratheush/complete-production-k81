@@ -209,7 +209,7 @@ pipeline {
             // ✔ Convert the multi-line yq filter into a SINGLE LINE yq expression
             // No multiline → No heredoc → No lexer errors → 100% working.
             // FINAL WORKING yq filter (single-line, no multiline parsing issues)
-            def yqFilter = "if .kind == "Deployment" then .spec.template.spec.containers |= map(if .name == "task-app" then .image = "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}" else . end) else . end"
+            def yqFilter = "if .kind == \"Deployment\" then .spec.template.spec.containers |= map(if .name == \"task-app\" then .image = \"${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}\" else . end) else . end"
             // def yqFilter = "if .kind == \"Deployment\" then .spec.template.spec.containers |= map(if .name == \"task-app\" then .image = \"" +
             //    "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}\" else . end) else . end"
 
