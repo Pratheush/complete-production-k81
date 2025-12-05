@@ -307,25 +307,26 @@ pipeline {
                 // When yq tries to apply .spec.template.spec.containers[] to non‑Deployment documents (Service, Ingress), those paths don’t exist.
                 // yq then creates empty stubs (template.spec.containers: []) under those objects.
                 // That’s why your feature branch manifests show bogus template: spec: containers: [] under Service and Ingress.
-                sh """
-                  echo "Updating image fields to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+                echo "Updating image fields to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
 
-                  for f in \$(find . -name "*.yaml" -not -path "./.git/*"); do
-                    echo "Processing \$f"
-                    yq e -i '
-                  if .kind == "Deployment" then
-                    .spec.template.spec.containers
-                      |= map(
-                          if .name == "task-app"
-                          then .image = "'${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}'"
-                          else .
-                          end
-                        )
-                  else .
-                  end
-                ' "\$f"
-                  done
-                """
+                for f in $(find . -name "*.yaml" -not -path "./.git/*"); do
+                  echo "Processing $f"
+
+                  yq e -i "$(cat <<EOF
+                if .kind == "Deployment" then
+                  .spec.template.spec.containers |= map(
+                    if .name == "task-app"
+                    then .image = "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+                    else .
+                    end
+                  )
+                else .
+                end
+                EOF
+                )" "$f"
+
+                done
+
 
 
 
