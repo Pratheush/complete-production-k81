@@ -1,0 +1,300 @@
+pipeline {
+
+  parameters {
+    booleanParam(name: 'CLEANUP_ENABLED', defaultValue: true, description: 'Clean up Docker images after Pushed into Dockerhub Repository & Deploying into K8 cluster')
+  }
+
+  agent any
+
+  tools {
+    maven "maven_3_9_5"
+  }
+
+  options {
+    skipDefaultCheckout(true) // We control checkout manually
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    // Correction: Consider shorter timeouts per stage (e.g., 10–15 minutes for build/test, 5 minutes for scans).NOT 30
+    timeout(time: 30, unit: 'MINUTES')
+    timestamps()
+  }
+
+  environment {
+    // NOTE: use SSH URL for manifest repo (sshagent does not auth HTTPS)
+    REGISTRY = "pratheush"
+    IMAGE_NAME = "spring-taskapp-jenkins-k8-cicd"
+    DOCKER_IMAGE_NAME = "${REGISTRY}/${IMAGE_NAME}"
+    DOCKER_CREDENTIALS_ID = 'dockerhub-uname-pwd-token'
+    SONAR_TOKEN = credentials('jenkins-sonarqube-token')
+
+    // Provide SSH remote URL (only one). Make sure credential id 'github-ssh-key' exists in Jenkins.
+    MANIFEST_REPO = "git@github.com:Pratheush/spring-taskapp-k8-manifests.git"
+    MANIFEST_REPO_DIR = "manifests"
+    DEPLOYMENT_FILE = "task-deployment.yaml"
+  }
+
+  triggers {
+    githubPush()
+  }
+
+  stages {
+
+    stage('Checkout') {
+      steps {
+        echo '📦 Checking out source code...'
+
+        git branch: 'main', url: 'https://github.com/Pratheush/complete-production-k81.git'
+        script {
+          env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+          echo "Detected short commit: ${env.GIT_COMMIT_SHORT}"
+          env.IMAGE_FULL = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+        }
+      }
+    }
+
+    stage('Trivy Scan - Filesystem - Maven Dependencies') {
+      steps {
+        script {
+          echo "🔍 Trivy Scan for Maven Dependencies (Filesystem)..."
+          sh "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl > html.tpl"
+          sh "trivy fs --exit-code 1 --severity HIGH,CRITICAL --no-progress --pkg-types library --format template --template \"@html.tpl\" -o report-trivy-fs.html ."
+          publishHTML([
+            reportDir: '.',
+            reportFiles: 'report-trivy-fs.html',
+            reportName: 'Trivy Filesystem Maven Dependency Scan Security-Report'
+          ])
+        }
+      }
+    }
+
+    stage('Build & Test App') {
+      steps {
+        echo '🛠️ Building Spring Boot application with Maven...'
+        sh 'mvn clean verify'
+      }
+    }
+
+    stage('SonarQube Analysis') {
+      steps {
+        echo 'Going to Run static code analysis SpringBoot Application'
+        withSonarQubeEnv(installationName: 'sonarqube') {
+          sh 'mvn sonar:sonar -Dsonar.token=$SONAR_TOKEN -Dsonar.projectKey=spring-taskapp-jenkins-k8-cicd-projectKey -Dsonar.projectName=spring-taskapp-jenkins-k8-cicd-projectName -Dsonar.projectVersion=1.0 -Dsonar.host.url=http://localhost:9000 -Dsonar.junit.reportPaths=target/surefire-reports,target/failsafe-reports -Dsonar.coverage.jacoco.xmlReportPaths=target/jacoco-report/jacoco.xml'
+        }
+      }
+    }
+
+    stage("Quality Gate") {
+      steps {
+        echo 'Quality Gate PASS/FAIL CHECK'
+        echo '⏳ Waiting for SonarQube Quality Gate (timeout 5m)'
+        timeout(time: 5, unit: 'MINUTES') {
+          // This will fail the pipeline if gate is failed
+          waitForQualityGate abortPipeline: true
+        }
+      }
+    }
+
+    stage('Build Docker Image') {
+      steps {
+        echo '🐳 Building Docker image...(tagged with commit sha and latest)'
+        script {
+          sh """
+            docker build -t ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} .
+          """
+          env.IMAGE_FULL = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+          echo "✅ Built image: ${env.IMAGE_FULL} and tagged as latest"
+        }
+      }
+    }
+
+    stage('Trivy Scan - Docker Image') {
+      steps {
+        script {
+          echo "🔍 Trivy Scan Docker Image Built For Vulnerabilities..."
+          sh "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl > html.tpl"
+          sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress --format template --template \"@html.tpl\" -o report-trivy-docker-image-latest.html ${env.IMAGE_FULL}"
+          publishHTML([
+            reportDir: '.',
+            reportFiles: 'report-trivy-docker-image-latest.html',
+            reportName: 'Trivy Final DockerImage Scan Security-Report'
+          ])
+        }
+      }
+    }
+
+    stage('Push Docker Image to DockerHub') {
+      steps {
+        echo '🚀 Pushing Docker image...'
+        withCredentials([usernamePassword(credentialsId: DOCKER_CREDENTIALS_ID,
+                                          usernameVariable: 'DOCKER_USER',
+                                          passwordVariable: 'DOCKER_PASS')]) {
+          retry(3) {
+            sh """
+              echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+              docker push ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}
+            """
+          }
+        }
+        echo "🚀 Docker image ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} pushed to DockerHub successfully!"
+      }
+    }
+
+    stage('Clean Docker Images (optional)') {
+      when {
+        expression { params.CLEANUP_ENABLED }
+      }
+      steps {
+        echo "🧹 Cleaning up local Docker images as cleanup is enabled..."
+        script {
+
+          try {
+                sh "docker rmi ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+          } catch (Exception e) {
+                echo "Image not found or in use, skipping cleanup."
+                echo "Cleanup skipped: ${e.getMessage()}"
+          }
+
+        }
+      }
+    }
+
+    stage('Trigger ManifestUpdate (GitOps)') {
+      steps {
+        script {
+          echo "===== Starting Manifest Update Stage ====="
+          try {
+            // use sshagent with the Jenkins credential that has write access to the manifest repo
+            sshagent(['github-ssh-key']) {
+
+              // detect default branch of manifest repo, fallback to main
+              def targetBranch = sh(
+                  script: """
+                      git ls-remote --symref ${env.MANIFEST_REPO} HEAD 2>/dev/null \
+                      | awk '/^ref:/ {print \$2}' \
+                      | sed 's@refs/heads/@@' \
+                      | head -n1
+                  """,
+                  returnStdout: true
+                ).trim()
+
+              if (!targetBranch) targetBranch = 'main'
+              echo "Detected target branch: ${targetBranch}"
+
+
+            int attempts = 0
+            int maxAttempts = 3
+            while (attempts < maxAttempts) {
+            try {
+                sh """
+                rm -rf ${MANIFEST_REPO_DIR}
+                git clone -b ${targetBranch} ${MANIFEST_REPO} ${MANIFEST_REPO_DIR}
+                """
+                break  // success → exit loop
+            } catch (Exception e) {
+                attempts++
+                if (attempts >= maxAttempts) {
+                error "❌ Git clone failed after ${maxAttempts} attempts"
+                }
+                echo "⚠️ Git clone failed (attempt ${attempts}), retrying in 10s..."
+                sleep 10  // backoff before retry
+            }
+            }
+
+              dir("${MANIFEST_REPO_DIR}") {
+
+                sh "git remote set-url origin ${MANIFEST_REPO} || true"
+
+                // set git identity for automated commit
+                sh """
+                  git config user.email "jenkins@company.com"
+                  git config user.name "Jenkins CI"
+                """
+
+                sh """
+                  echo "Updating image fields to ${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+
+                  # Loop through all YAML files
+                  for f in \$(find . -name "*.yaml" -not -path "./.git/*"); do
+                    echo "Processing \$f"
+
+                    yq e -i \"\$(cat << 'EOF'
+                if .kind == "Deployment" then
+                  .spec.template.spec.containers |= map(
+                    if .name == "task-app"
+                    then .image = "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+                    else .
+                    end
+                  )
+                else .
+                end
+                EOF
+                )\" \"\$f\"
+
+                  done
+                """
+
+                // check for changes
+                def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
+                if (!changes) {
+                  echo "No manifest changes detected. Skipping commit/PR."
+                } else {
+                  def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}"
+                  sh "git checkout -b ${prBranch}"
+                  sh "git add -A"
+
+                  sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
+
+                  sh "git push --set-upstream origin ${prBranch}"
+
+                  echo "Branch ${prBranch} pushed successfully."
+
+                  // Attempt to create PR using gh CLI if available
+                  def ghExists = sh(script: "which gh >/dev/null 2>&1 && echo true || echo false", returnStdout: true).trim()
+                  if (ghExists == 'true') {
+                     def repoName = sh(script: "git config --get remote.origin.url | sed -E 's#(git@|https://)github.com[:/]##; s#.git##'",returnStdout: true).trim()
+                    sh """
+                      gh pr create --repo ${repoName} --head ${prBranch} --base ${targetBranch} --title "chore: update image ${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}" --body "Automated manifest update by Jenkins (${env.BUILD_URL})"
+                    """
+                    echo "Pull Request created for branch ${prBranch} in repo ${repoName}."
+                  } else {
+                    echo "⚠️ gh CLI not installed in agent. Branch pushed, please create PR manually or install gh CLI."
+                  }
+                } // end if changes
+              } // end dir
+            } // end sshagent
+          } catch (Exception e) {
+            echo "❌ Manifest update failed: ${e.message}"
+            // Mark build unstable but continue to post actions
+            currentBuild.result = 'UNSTABLE'
+            throw e
+          }
+          echo "===== Manifest Update Completed (or skipped) ====="
+        } // end script
+      } // end steps
+    } // end stage Trigger ManifestUpdate
+
+  } // end stages
+
+  // docker logout WE CAN ADD LOGOUT RIGHT AFTER PUSH INSIDE THE SCRIPT
+  post {
+    always {
+      sh 'docker logout || true'
+      echo '🧾 Archiving reports and test results'
+      junit allowEmptyResults: true, testResults: '**/surefire-reports/*.xml, **/failsafe-reports/*.xml'
+      recordCoverage(tools: [[parser: 'JACOCO', pattern: 'target/jacoco-report/jacoco.xml']], sourceDirectories: [[path: 'src/main/java']])
+      archiveArtifacts artifacts: 'report-*.html', allowEmptyArchive: true
+      echo "🏁 Cleaning Workspace."
+      cleanWs()
+      echo "🏁 Pipeline execution finished."
+    }
+    success {
+      echo '✅ Pipeline executed successfully.'
+      echo '🚀 Docker image successfully built and pushed!'
+    }
+    unstable {
+      echo "⚠️ Build is unstable - check warnings/quality gates"
+    }
+    failure {
+      echo "❌ CI/CD Pipeline failed! See console log for details."
+    }
+  }
+}
