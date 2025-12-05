@@ -206,22 +206,33 @@ pipeline {
             // ---------------------------------------------------------------------------------------
             // ✔ SAFELY define yq filter in Groovy (No heredoc, no $(cat), no Groovy string issues)
             // ---------------------------------------------------------------------------------------
-            // ✔ Convert the multi-line yq filter into a SINGLE LINE yq expression
-            // No multiline → No heredoc → No lexer errors → 100% working.
-            // FINAL WORKING yq filter (single-line, no multiline parsing issues)
-            def yqFilter = '''if .kind == "Deployment" then .spec.template.spec.containers |= map(if .name == "task-app" then .image = "'"${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"'" else . end) else . end'''
-            // def yqFilter = "if .kind == \"Deployment\" then .spec.template.spec.containers |= map(if .name == \"task-app\" then .image = \"" +
-            //    "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}\" else . end) else . end"
-
-            // ---------------------------------------------------------------------------------------
-            // ✔ Run loop safely and apply yq filter
-            // ---------------------------------------------------------------------------------------
             sh """
-            echo "Updating image fields to ${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+            NEW_IMAGE="${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+
+            echo "Updating image to: \$NEW_IMAGE"
 
             for f in \$(find . -name "*.yaml" -not -path "./.git/*"); do
-              echo "Processing \$f"
-              yq e -i '${yqFilter}' "\$f"
+            echo "Processing \$f"
+
+            sed -i '
+                /kind: Deployment/ {
+                :loop
+                n
+                /containers:/!b loop
+
+                :containers_loop
+                n
+
+                /- name: task-app/ {
+                    n
+                    s|image:.*|image: '"\$NEW_IMAGE"'|
+                }
+
+                /- name:/b containers_loop
+                /image:/b containers_loop
+                }
+            ' "\$f"
+
             done
             """
 
