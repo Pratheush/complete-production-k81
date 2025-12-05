@@ -153,115 +153,121 @@ pipeline {
     }
 
     stage('Trigger ManifestUpdate (GitOps)') {
-      steps {
-        script {
-          echo "===== Starting Manifest Update Stage ====="
-          try {
-            sshagent(['github-ssh-key']) {
+  steps {
+    script {
+      echo "===== Starting Manifest Update Stage ====="
+      try {
+        sshagent(['github-ssh-key']) {
 
-              // detect default branch of manifest repo, fallback to main
-              def targetBranch = sh(
-                script: """
-                  git ls-remote --symref ${env.MANIFEST_REPO} HEAD 2>/dev/null \
-                    | awk '/^ref:/ {print \$2}' \
-                    | sed 's@refs/heads/@@' \
-                    | head -n1
-                """,
-                returnStdout: true
-              ).trim()
+          // detect default branch of manifest repo, fallback to main
+          def targetBranch = sh(
+            script: """
+              git ls-remote --symref ${env.MANIFEST_REPO} HEAD 2>/dev/null \
+                | awk '/^ref:/ {print \$2}' \
+                | sed 's@refs/heads/@@' \
+                | head -n1
+            """,
+            returnStdout: true
+          ).trim()
 
-              if (!targetBranch) targetBranch = 'main'
-              echo "Detected target branch: ${targetBranch}"
+          if (!targetBranch) targetBranch = 'main'
+          echo "Detected target branch: ${targetBranch}"
 
-              // clone manifest repo (with simple retry)
-              int attempts = 0
-              int maxAttempts = 3
-              while (attempts < maxAttempts) {
-                try {
-                  sh """
-                    rm -rf ${MANIFEST_REPO_DIR}
-                    git clone -b ${targetBranch} ${MANIFEST_REPO} ${MANIFEST_REPO_DIR}
-                  """
-                  break
-                } catch (Exception e) {
-                  attempts++
-                  if (attempts >= maxAttempts) {
-                    error "❌ Git clone failed after ${maxAttempts} attempts"
-                  }
-                  echo "⚠️ Git clone failed (attempt ${attempts}), retrying in 10s..."
-                  sleep 10
-                }
+          // clone manifest repo (with simple retry)
+          int attempts = 0
+          int maxAttempts = 3
+          while (attempts < maxAttempts) {
+            try {
+              sh """
+                rm -rf ${MANIFEST_REPO_DIR}
+                git clone -b ${targetBranch} ${MANIFEST_REPO} ${MANIFEST_REPO_DIR}
+              """
+              break
+            } catch (Exception e) {
+              attempts++
+              if (attempts >= maxAttempts) {
+                error "❌ Git clone failed after ${maxAttempts} attempts"
               }
+              echo "⚠️ Git clone failed (attempt ${attempts}), retrying in 10s..."
+              sleep 10
+            }
+          }
 
-              dir("${MANIFEST_REPO_DIR}") {
+          dir("${MANIFEST_REPO_DIR}") {
 
-                sh "git remote set-url origin ${MANIFEST_REPO} || true"
+            sh "git remote set-url origin ${MANIFEST_REPO} || true"
 
-                // set git identity for automated commit
-                sh """
-                  git config user.email "jenkins@company.com"
-                  git config user.name "Jenkins CI"
-                """
+            // set git identity for automated commit
+            sh """
+              git config user.email "jenkins@company.com"
+              git config user.name "Jenkins CI"
+            """
 
-                // --- SAFELY update Deployment images using yq (heredoc must start at column 0) ---
-                sh """
-                  echo "Updating image fields to ${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
-
-                  for f in \$(find . -name \"*.yaml\" -not -path \"./.git/*\"); do
-                    echo "Processing \$f"
-
-                    yq e -i \"\$(cat << 'EOF'
+            // ---------------------------------------------------------------------------------------
+            // ✔ SAFELY define yq filter in Groovy (No heredoc, no $(cat), no Groovy string issues)
+            // ---------------------------------------------------------------------------------------
+            def yqFilter = '''
 if .kind == "Deployment" then
   .spec.template.spec.containers |= map(
-    if .name == "task-app"
-    then .image = "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+    if .name == "task-app" then
+      .image = "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
     else .
     end
   )
 else .
 end
-EOF
-)\" \"\$f\"
-                  done
+'''
+
+            // ---------------------------------------------------------------------------------------
+            // ✔ Run loop safely and apply yq filter
+            // ---------------------------------------------------------------------------------------
+            sh """
+            echo "Updating image fields to ${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+
+            for f in \$(find . -name "*.yaml" -not -path "./.git/*"); do
+              echo "Processing \$f"
+              yq e -i '${yqFilter}' "\$f"
+            done
+            """
+
+            // check for changes
+            def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
+            if (!changes) {
+              echo "No manifest changes detected. Skipping commit/PR."
+            } else {
+              def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}"
+              sh "git checkout -b ${prBranch}"
+              sh "git add -A"
+              sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
+              sh "git push --set-upstream origin ${prBranch}"
+
+              echo "Branch ${prBranch} pushed successfully."
+
+              // Attempt to create PR using gh CLI if available
+              def ghExists = sh(script: "which gh >/dev/null 2>&1 && echo true || echo false", returnStdout: true).trim()
+              if (ghExists == 'true') {
+                def repoName = sh(script: "git config --get remote.origin.url | sed -E 's#(git@|https://)github.com[:/]##; s#.git##'", returnStdout: true).trim()
+                sh """
+                  gh pr create --repo ${repoName} --head ${prBranch} --base ${targetBranch} --title "chore: update image ${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}" --body "Automated manifest update by Jenkins (${env.BUILD_URL})"
                 """
+                echo "Pull Request created for branch ${prBranch} in repo ${repoName}."
+              } else {
+                echo "⚠️ gh CLI not installed in agent. Branch pushed, please create PR manually or install gh CLI."
+              }
+            } // if changes
+          } // dir
 
-                // check for changes
-                def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
-                if (!changes) {
-                  echo "No manifest changes detected. Skipping commit/PR."
-                } else {
-                  def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}"
-                  sh "git checkout -b ${prBranch}"
-                  sh "git add -A"
-                  sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
-                  sh "git push --set-upstream origin ${prBranch}"
+        } // sshagent
+      } catch (Exception e) {
+        echo "❌ Manifest update failed: ${e.message}"
+        currentBuild.result = 'UNSTABLE'
+        throw e
+      }
+      echo "===== Manifest Update Completed (or skipped) ====="
+    } // script
+  } // steps
+} // stage Trigger ManifestUpdate
 
-                  echo "Branch ${prBranch} pushed successfully."
-
-                  // Attempt to create PR using gh CLI if available
-                  def ghExists = sh(script: "which gh >/dev/null 2>&1 && echo true || echo false", returnStdout: true).trim()
-                  if (ghExists == 'true') {
-                    def repoName = sh(script: "git config --get remote.origin.url | sed -E 's#(git@|https://)github.com[:/]##; s#.git##'", returnStdout: true).trim()
-                    sh """
-                      gh pr create --repo ${repoName} --head ${prBranch} --base ${targetBranch} --title "chore: update image ${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}" --body "Automated manifest update by Jenkins (${env.BUILD_URL})"
-                    """
-                    echo "Pull Request created for branch ${prBranch} in repo ${repoName}."
-                  } else {
-                    echo "⚠️ gh CLI not installed in agent. Branch pushed, please create PR manually or install gh CLI."
-                  }
-                } // if changes
-              } // dir
-
-            } // sshagent
-          } catch (Exception e) {
-            echo "❌ Manifest update failed: ${e.message}"
-            currentBuild.result = 'UNSTABLE'
-            throw e
-          }
-          echo "===== Manifest Update Completed (or skipped) ====="
-        } // script
-      } // steps
-    } // stage Trigger ManifestUpdate
 
   } // stages
 
