@@ -204,7 +204,7 @@ pipeline {
             //      """
             //   }
 
-        
+
             int attempts = 0
             int maxAttempts = 3
             while (attempts < maxAttempts) {
@@ -247,7 +247,7 @@ pipeline {
                 //     sed -i.bak -E \"s|(^[[:space:]]*image:[[:space:]]*)([^[:space:]]+)|\\1${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}|g\" \"\$f\"
                 //   done
                 // """
-                
+
                 // So even if multiple containers exist, only the intended one is updated.
                 // Update image fields in any yaml that contains 'image:'
                 // To make it production‑safe, filter by container name. in multi-container pod
@@ -285,17 +285,17 @@ pipeline {
                 //         echo "Updating \$f"
                 //         # Update only the container named 'task-app': "yq e -i" > edits the file in place.
                 //         echo "finds the container named task-app and updates its image Sets it to : ${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
-                //         yq e -i '(.spec.template.spec.containers[] 
-                //                 | select(.name == "task-app") 
+                //         yq e -i '(.spec.template.spec.containers[]
+                //                 | select(.name == "task-app")
                 //                 | .image) = "'${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}'"' "\$f"
                 //     fi
                 //     done
                 // """
-                
+
                 // ABOVE UPDATING CODE SNIPPET PROBLEM DISCUSSED DOWN HERE WHICH IS FIXED DOWN BELOW AFTER EXPLANATION ::
                 // the extra template: spec: containers: [] blocks in your Service and Ingress are creating because above code snippet for updating 
                 // my YAML files are multi‑document manifests (Deployment + Service + Ingress in one file)
-                // in above code i used loop like this :: 
+                // in above code i used loop like this ::
                 // for f in $(find . -name "*.yaml" -not -path "./.git/*"); do
                 //   if yq e '.kind' "$f" | grep -q "Deployment"; then
                 //     yq e -i '(.spec.template.spec.containers[]
@@ -307,28 +307,29 @@ pipeline {
                 // When yq tries to apply .spec.template.spec.containers[] to non‑Deployment documents (Service, Ingress), those paths don’t exist.
                 // yq then creates empty stubs (template.spec.containers: []) under those objects.
                 // That’s why your feature branch manifests show bogus template: spec: containers: [] under Service and Ingress.
-                 sh """
-                    echo "Updating image fields to ${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+                sh """
+                  echo "Updating image fields to ${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
 
-                    # Loop through all YAML files
-                    for f in \$(find . -name "*.yaml" -not -path "./.git/*"); do
-                      echo "Processing \$f"
+                  # Loop through all YAML files
+                  for f in \$(find . -name "*.yaml" -not -path "./.git/*"); do
+                    echo "Processing \$f"
 
-                      yq e -i \"\$(cat << 'EOF'
-                        if .kind == "Deployment" then
-                            .spec.template.spec.containers |= map(
-                        if .name == "task-app"
-                          then .image = "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
-                        else .
-                        end
-                      )
-                      else .
+                    yq e -i \"\$(cat << 'EOF'
+                if .kind == "Deployment" then
+                  .spec.template.spec.containers |= map(
+                    if .name == "task-app"
+                    then .image = "${REGISTRY}/${IMAGE_NAME}:${GIT_COMMIT_SHORT}"
+                    else .
                     end
-                    EOF
-                  )\" \"\$f\"
+                  )
+                else .
+                end
+                EOF
+                )\" \"\$f\"
 
                   done
-                  """
+                """
+
 
                 // check for changes
                 def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
@@ -347,7 +348,7 @@ pipeline {
                   sh "git diff --cached --quiet || git commit -m 'chore: update image to ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} (automated)'"
                   // "git rebase origin/${prBranch} : JUST rebasing with || true is fragile if the branch doesn’t exist remotely yet.
                   // masking errors with || true, but that means if rebase fails, Jenkins will continue silently. That can leave your branch in a detached or conflicted state.
-                  
+
                   // ADDING ABOVE THIS CODE : def prBranch = "update-image-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}" WE should NOT use rebase logic
                   // Rebase can fail → repo becomes conflicted → Jenkins stage breaks. || true hides the failure, leaving the git repo corrupted
                   // You do NOT need rebase because your PR branch names are UNIQUE. ✔ Since branch names are unique, your rebase block is useless.
@@ -390,7 +391,7 @@ pipeline {
   // docker logout WE CAN ADD LOGOUT RIGHT AFTER PUSH INSIDE THE SCRIPT
   post {
     always {
-      sh 'docker logout || true'  
+      sh 'docker logout || true'
       echo '🧾 Archiving reports and test results'
       junit allowEmptyResults: true, testResults: '**/surefire-reports/*.xml, **/failsafe-reports/*.xml'
       recordCoverage(tools: [[parser: 'JACOCO', pattern: 'target/jacoco-report/jacoco.xml']], sourceDirectories: [[path: 'src/main/java']])
