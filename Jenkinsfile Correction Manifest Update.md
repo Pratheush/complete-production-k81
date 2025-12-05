@@ -567,3 +567,55 @@ WorkflowScript: 95: unexpected token: > @ line 95, column 60.
    uild && lastBuild.num as long > "${env.B
                                  ^
 ```
+
+***
+
+### Option 1: Authenticate `gh` once on the agent
+
+1. Log into your Jenkins agent (where the job runs).
+
+ERROR :
+
+```bash
+gh pr create …
+Welcome to GitHub CLI!
+To authenticate, please run `gh auth login`.
+❌ Manifest update failed: script returned exit code 4
+```
+
+- Choose GitHub.com
+
+- Choose SSH or HTTPS depending on your repo setup
+
+- Paste a Personal Access Token (PAT) with `repo` scope if prompted
+
+Log into your Jenkins agent (where the job runs).
+
+`gh auth login`
+
+Verify: `gh auth status`
+
+1. It should show you’re logged in.
+
+Now Jenkins jobs can run `gh pr create` non‑interactively.
+
+```bash
+jenkins@Lord-Shiva:~$ gh auth login
+? What account do you want to log into? GitHub.com
+? What is your preferred protocol for Git operations? HTTPS
+? Authenticate Git with your GitHub credentials? Yes
+? How would you like to authenticate GitHub CLI? Paste an authentication token
+Tip: you can generate a Personal Access Token here https://github.com/settings/tokens
+The minimum required scopes are 'repo', 'read:org', 'workflow'.
+? Paste your authentication token: *********************************************************************************************
+- gh config set -h github.com git_protocol https
+✓ Configured git protocol
+✓ Logged in as Pratheush
+jenkins@Lord-Shiva:~$ gh auth status
+github.com
+  ✓ Logged in to github.com as Pratheush (/var/lib/jenkins/.config/gh/hosts.yml)
+  ✓ Git operations for github.com configured to use https protocol.
+  ✓ Token: *******************
+
+jenkins@Lord-Shiva:~$
+```
