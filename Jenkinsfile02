@@ -313,7 +313,7 @@ sh """
   for f in \$(find . -name "*.yaml" -not -path "./.git/*"); do
     echo "Processing \$f"
 
-    yq e -i \"\$(cat << 'EOF'
+    yq e -i \"\$(cat <<'EOF'
 if .kind == "Deployment" then
   .spec.template.spec.containers |= map(
     if .name == "task-app"
