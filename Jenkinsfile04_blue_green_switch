@@ -1,0 +1,662 @@
+pipeline {
+
+  parameters {
+    booleanParam(name: 'CLEANUP_ENABLED', defaultValue: true, description: 'Clean up Docker images after Pushed into Dockerhub Repository & Deploying into K8 cluster')
+
+    booleanParam(name: 'POST_DEPLOY_INTEG_CHECKS', defaultValue: false, description: 'Post Deploy integration Test Checks')
+  }
+
+  agent any
+
+  tools {
+    maven "maven_3_9_5"
+  }
+
+  options {
+    skipDefaultCheckout(true) // We control checkout manually
+    buildDiscarder(logRotator(numToKeepStr: '10'))
+    // Correction: Consider shorter timeouts per stage (e.g., 10–15 minutes for build/test, 5 minutes for scans).NOT 30
+    timeout(time: 30, unit: 'MINUTES')
+    timestamps()
+    //disableConcurrentBuilds()
+  }
+
+  environment {
+    // NOTE: use SSH URL for manifest repo (sshagent does not auth HTTPS)
+    REGISTRY = "pratheush"
+    IMAGE_NAME = "spring-taskapp-jenkins-k8-cicd"
+    DOCKER_IMAGE_NAME = "${REGISTRY}/${IMAGE_NAME}"
+    DOCKER_CREDENTIALS_ID = 'dockerhub-uname-pwd-token'
+    SONAR_TOKEN = credentials('jenkins-sonarqube-token')
+
+    // Provide SSH remote URL (only one). Make sure credential id 'github-ssh-key' exists in Jenkins.
+    MANIFEST_REPO = "git@github.com:Pratheush/spring-taskapp-k8-manifests.git"
+    MANIFEST_REPO_DIR = "manifests"
+    DEPLOYMENT_FILE = "task-deployment.yaml"
+    DEPLOY_ENV = "green"
+
+    // Customize these for your cluster
+    K8S_NAMESPACE = "task-postgres"
+    APP_LABEL = "app=task-app"          // must match your Deployment labels
+    SERVICE_NAME = "task-app"           // must match your Service
+    HEALTH_PATH = "/actuator/health" // or "/health"
+    HEALTH_EXPECT = "UP"             // expected response content or 200 OK
+  }
+
+  triggers {
+    githubPush()
+  }
+
+  stages {
+
+    // 🛠 deleteDir() : Deletes everything in the current workspace immediately.
+    // Typically used at the start of a pipeline to guarantee a fresh workspace before any steps run.
+    // If you already use cleanWs() in post, you don’t have to use deleteDir() at start.
+    // deleteDir() → ensures no stale files interfere with your build.
+    // cleanWs() → ensures no build artifacts clutter disk after pipeline completes.
+    stage('Init') {
+      steps {
+        echo '🛠️ Init : deleteDir() deletes everything in current workspace ensures no stale files interfere with your build...'
+        //deleteDir() // wipe workspace at the very beginning
+    }
+  }
+
+    stage('Checkout') {
+      steps {
+        echo '📦 Checking out source code...'
+        // Checkout application repo (https ok for main app)
+        git branch: 'main', url: 'https://github.com/Pratheush/complete-production-k81.git'
+        script {
+          env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
+          echo "Detected short commit: ${env.GIT_COMMIT_SHORT}"
+          env.IMAGE_FULL = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+        }
+      }
+    }
+
+    stage('Trivy Scan - Filesystem - Maven Dependencies') {
+      steps {
+        script {
+          echo "🔍 Trivy Scan for Maven Dependencies (Filesystem)..."
+          sh "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl > html.tpl"
+          sh "trivy fs --exit-code 1 --severity HIGH,CRITICAL --no-progress --pkg-types library --format template --template \"@html.tpl\" -o report-trivy-fs.html ."
+          publishHTML([
+            reportDir: '.',
+            reportFiles: 'report-trivy-fs.html',
+            reportName: 'Trivy Filesystem Maven Dependency Scan Security-Report'
+          ])
+        }
+      }
+    }
+
+    stage('Build & Test App') {
+      steps {
+        echo '🛠️ Building Spring Boot application with Maven...'
+        sh 'mvn clean verify'
+      }
+    }
+
+    stage('SonarQube Analysis') {
+      steps {
+        echo 'Going to Run static code analysis SpringBoot Application'
+        withSonarQubeEnv(installationName: 'sonarqube') {
+          sh 'mvn sonar:sonar -Dsonar.token=$SONAR_TOKEN -Dsonar.projectKey=spring-taskapp-jenkins-k8-cicd-projectKey -Dsonar.projectName=spring-taskapp-jenkins-k8-cicd-projectName -Dsonar.projectVersion=1.0 -Dsonar.host.url=http://localhost:9000 -Dsonar.junit.reportPaths=target/surefire-reports,target/failsafe-reports -Dsonar.coverage.jacoco.xmlReportPaths=target/jacoco-report/jacoco.xml'
+        }
+      }
+    }
+
+    stage("Quality Gate") {
+      steps {
+        echo 'Quality Gate PASS/FAIL CHECK'
+        echo '⏳ Waiting for SonarQube Quality Gate (timeout 5m)'
+        timeout(time: 5, unit: 'MINUTES') {
+          // This will fail the pipeline if gate is failed
+          waitForQualityGate abortPipeline: true
+        }
+      }
+    }
+
+    // using latest in production considered as bad practice.
+    // docker tag ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} ${env.REGISTRY}/${env.IMAGE_NAME}:latest
+    stage('Build Docker Image') {
+      steps {
+        echo '🐳 Building Docker image...(tagged with commit sha and latest)'
+        script {
+          sh """
+            docker build -t ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} .
+          """
+          env.IMAGE_FULL = "${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+          echo "✅ Built image: ${env.IMAGE_FULL} and tagged as latest"
+        }
+      }
+    }
+
+    stage('Trivy Scan - Docker Image') {
+      steps {
+        script {
+          echo "🔍 Trivy Scan Docker Image Built For Vulnerabilities..."
+          sh "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/html.tpl > html.tpl"
+          sh "trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress --format template --template \"@html.tpl\" -o report-trivy-docker-image-latest.html ${env.IMAGE_FULL}"
+          publishHTML([
+            reportDir: '.',
+            reportFiles: 'report-trivy-docker-image-latest.html',
+            reportName: 'Trivy Final DockerImage Scan Security-Report'
+          ])
+        }
+      }
+    }
+
+    // using latest in production considered as bad practice.
+    // docker push ${env.REGISTRY}/${env.IMAGE_NAME}:latest
+    stage('Push Docker Image to DockerHub') {
+      steps {
+        echo '🚀 Pushing Docker image...'
+        withCredentials([usernamePassword(credentialsId: DOCKER_CREDENTIALS_ID,
+                                          usernameVariable: 'DOCKER_USER',
+                                          passwordVariable: 'DOCKER_PASS')]) {
+          retry(3) {
+            sh """
+              echo \$DOCKER_PASS | docker login -u \$DOCKER_USER --password-stdin
+              docker push ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}
+            """
+          }
+        }
+        echo "🚀 Docker image ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} pushed to DockerHub successfully!"
+      }
+    }
+
+    // masking errors with || true IS ACCEPTABLE in cleanup stages
+    // BUT MASKING ERRORS No, in critical stages (like build, test, push, manifest update) masking errors would be dangerous because you’d miss real failures
+    // Example: git commit ... || true → dangerous, because you’d miss commit failures.
+    // Example: docker push ... || true → dangerous, because you’d miss push failures.
+    // replace || true with explicit checks or try/catch so you log the reason instead of silently ignoring it.
+    // Silently ignores all errors (image not found, permission denied, daemon not running, etc.)
+    // Jenkins will never know if something genuinely went wrong. Pipeline logs don’t explain why cleanup was skipped.
+    stage('Clean Docker Images (optional)') {
+      when {
+        expression { params.CLEANUP_ENABLED }
+      }
+      steps {
+        echo "🧹 Cleaning up local Docker images as cleanup is enabled..."
+        script {
+          // Best-effort remove (do not fail the build on rmi error)
+          // sh "docker rmi ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT} || true"
+          // sh "docker rmi ${env.REGISTRY}/${env.IMAGE_NAME}:latest || true"
+          try {
+                sh "docker rmi ${env.REGISTRY}/${env.IMAGE_NAME}:${env.GIT_COMMIT_SHORT}"
+          } catch (Exception e) {
+                echo "Image not found or in use, skipping cleanup."
+                echo "Cleanup skipped: ${e.getMessage()}"
+          }
+
+        }
+      }
+    }
+
+/* Why these changes help
+Retry clarity:
+Label: Built‑in retry
+Description: retry(3) is idiomatic Jenkins, easier to read, and avoids custom loops.
+
+Fail‑fast shell:
+Label: set -euo pipefail
+Description: Stops on first error, catches undefined variables, and fails on broken pipelines.
+
+Commit hygiene:
+Label: Conditional commit
+Description: Prevents empty commits and noisy history.
+
+Deterministic clone:
+Label: Branch + shallow clone
+Description: Faster, predictable, and reduces workspace size.
+
+Single source of failure:
+Label: error(...) only
+Description: Avoids double‑throw; Jenkins handles the failure state. */
+    // -------------------------
+    // GitOps Manifest Update Stage
+    // -------------------------
+     stage('Update Kustomize newTag') {
+  steps {
+    script {
+      sshagent(['github-ssh-key']) {
+        try {
+          // Clean any previous folder and clone fresh
+          // set -euo pipefail: Safer shell execution—fail on first error, undefined vars, and pipeline errors.
+          sh """
+            set -euo pipefail
+            rm -rf ${MANIFEST_REPO_DIR}
+          """
+
+          // Retry clone up to 3 times (built-in Jenkins retry)
+          retry(3) {
+            sh """
+              set -euo pipefail
+              git clone --branch main --depth 1 ${MANIFEST_REPO} ${MANIFEST_REPO_DIR}
+            """
+          }
+
+          dir("${MANIFEST_REPO_DIR}") {
+            // Validate target file exists
+            sh """
+              set -euo pipefail
+              test -f overlays/${DEPLOY_ENV}/kustomization.yaml
+            """
+
+            // Update tag
+            sh """
+              set -euo pipefail
+              sed -i 's|newTag:.*|newTag: ${COMMIT_SHA}|' overlays/${DEPLOY_ENV}/kustomization.yaml
+            """
+
+            // Configure identity
+            sh """
+              set -euo pipefail
+              git config user.email "jenkins@ci.local"
+              git config user.name "jenkins"
+            """
+
+            // Commit only if there are changes : Prevent empty commits by checking git status --porcelain.
+            sh """
+              set -euo pipefail
+              if [ -n "$(git status --porcelain)" ]; then
+                git add overlays/${DEPLOY_ENV}/kustomization.yaml
+                git commit -m "chore: deploy ${IMAGE_NAME}:${COMMIT_SHA} to ${DEPLOY_ENV}"
+              else
+                echo "No changes to commit."
+              fi
+            """
+
+            // Push (retry for transient network issues)
+            retry(3) {
+              sh """
+                set -euo pipefail
+                # Only push if a commit exists
+                if git log -1 --pretty=%B | grep -q "${COMMIT_SHA}"; then
+                  git push origin main
+                else
+                  echo "Skip push: no new commit."
+                fi
+              """
+            }
+          }
+        } catch (err) {
+          // Fail the build clearly; let post actions handle notifications
+          echo "❌ Manifest update failed: ${err}"
+          error("Failed to update manifests")
+        }
+      }
+    }
+  }
+}
+
+// RENAME : stage('Deploy green (manifests already updated)') → stage('GitOps: Await ArgoCD Sync') and only wait on Argo CD.
+stage('Deploy green (manifests already updated)') {
+      steps {
+        script {
+          // If you use ArgoCD GitOps, this stage might be a no-op or a sync trigger.
+          // If you apply directly (non-GitOps), do kubectl apply here.
+          sh """
+            set -euo pipefail
+            echo "Assuming manifests for ${DEPLOY_ENV} are already updated with newTag."
+            echo "If not using ArgoCD auto-sync, you could run: kubectl apply -k overlays/${DEPLOY_ENV}"
+          """
+        }
+      }
+    }
+
+    stage('Wait for readiness (K8s probes)') {
+      steps {
+        script {
+          // Wait for Deployment rollout to complete—this gates on readiness probes.
+          sh """
+            set -euo pipefail
+            kubectl -n ${K8S_NAMESPACE} rollout status deployment/${SERVICE_NAME} --timeout=180s
+          """
+
+          // Optional: verify all pods are Ready
+          sh """
+            set -euo pipefail
+            kubectl -n ${K8S_NAMESPACE} get pods -l ${APP_LABEL} -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[0].ready}{"\\n"}{end}' | tee pods_ready.txt
+            if grep -vq ' true' pods_ready.txt; then
+              echo "One or more pods are not Ready."
+              exit 1
+            fi
+          """
+        }
+      }
+    }
+
+    stage('Smoke tests against green') {
+      steps {
+        script {
+          // Simple approach: port-forward and curl the health endpoint.
+          // In production, you might hit the green Service via a dedicated selector or temporary canary ingress.
+          sh """
+            set -euo pipefail
+
+            POD_NAME=\$(kubectl -n ${K8S_NAMESPACE} get pods -l ${APP_LABEL} -o jsonpath='{.items[0].metadata.name}')
+            echo "Port-forwarding to pod: \$POD_NAME"
+
+            # Run port-forward in background
+            # >/tmp/pf.log 2>&1  : > → redirect standard output && 2>&1 → redirect standard error to the same place as standard output
+            # Redirects all output (both standard output and error messages) into the file /tmp/pf.log
+            # &  Runs the command in the background, so your terminal is free for other commands
+            # PF_PID=$!  $! stores the process ID (PID) of the most recently executed background command
+            #  saves the PID of the kubectl port-forward process into the variable PF_PID
+            kubectl -n ${K8S_NAMESPACE} port-forward \$POD_NAME 8080:8080 >/tmp/pf.log 2>&1 &
+            PF_PID=\$!
+
+            # Wait briefly for port-forward to establish
+            sleep 10
+
+            # Health check
+            STATUS=\$(curl -s -o /tmp/health.json -w "%{http_code}" http://localhost:8080${HEALTH_PATH})
+            echo "HTTP status: \$STATUS"
+            cat /tmp/health.json || true
+
+            # Validate status code and content (adjust to your app)
+            if [ "\$STATUS" != "200" ]; then
+              echo "Smoke test failed: non-200 status"
+              kill \$PF_PID || true
+              exit 1
+            fi
+
+            if ! grep -q "${HEALTH_EXPECT}" /tmp/health.json; then
+              echo "Smoke test failed: expected content '${HEALTH_EXPECT}' not found"
+              kill \$PF_PID || true
+              exit 1
+            fi
+
+            # Clean up port-forward
+            kill \$PF_PID || true
+          """
+        }
+      }
+    }
+
+    stage('Optional post-deploy integration checks') {
+      when {
+        //expression { return true } // set to false if you want to skip by default
+        expression {params.POST_DEPLOY_INTEG_CHECKS}
+      }
+      steps {
+        script {
+          // Keep this minimal—only critical flows that depend on cluster wiring.
+          // Example: DB connectivity check, a simple write/read flow.
+          sh """
+            set -euo pipefail
+
+            POD_NAME=\$(kubectl -n ${K8S_NAMESPACE} get pods -l ${APP_LABEL} -o jsonpath='{.items[0].metadata.name}')
+            kubectl -n ${K8S_NAMESPACE} exec \$POD_NAME -- \
+              curl -s -X POST http://localhost:8080/api/tasks -H 'Content-Type: application/json' \
+              -d '{"title":"smoke-task","description":"post-deploy check"}' > /tmp/create.json
+
+            kubectl -n ${K8S_NAMESPACE} exec \$POD_NAME -- \
+              curl -s http://localhost:8080/api/tasks | tee /tmp/list.json
+
+            if ! grep -q "smoke-task" /tmp/list.json; then
+              echo "Post-deploy integration check failed: created task not found"
+              exit 1
+            fi
+          """
+        }
+      }
+    }
+
+
+
+
+stage('Policy/Lint Gate: Kustomize Build Check') {
+  steps {
+    script {
+      echo "===== Running Kustomize Build Check ====="
+
+      // Work inside manifest repo
+      dir("${MANIFEST_REPO_DIR}") {
+        try {
+          // Render manifests with kustomize and validate with kubectl dry-run
+          sh """
+            set -euo pipefail
+            echo "Building manifests for overlay: ${DEPLOY_ENV}"
+            kustomize build overlays/${DEPLOY_ENV} | kubectl apply --dry-run=client -f -
+          """
+          echo "✅ Kustomize build and dry-run validation passed."
+        } catch (Exception e) {
+          echo "❌ Manifest validation failed: ${e.message}"
+          error("Kustomize build check failed. Fix manifests before creating PR.")
+        }
+      }
+    }
+  }
+}
+
+
+
+stage('Promote to Green') {
+  input {
+    message "Switch traffic to GREEN?"
+  }
+  steps {
+    script {
+      echo "===== Starting Promote to Green ====="
+
+      sshagent(['github-ssh-key']) {
+        // 1) Detect default branch (fallback to main)
+        def targetBranch = sh(
+          script: """
+            git ls-remote --symref ${env.MANIFEST_REPO} HEAD 2>/dev/null \
+            | awk '/^ref:/ {print \$2}' \
+            | sed 's@refs/heads/@@' \
+            | head -n1
+          """,
+          returnStdout: true
+        ).trim()
+        if (!targetBranch) { targetBranch = 'main' }
+        echo "Detected target branch: ${targetBranch}"
+
+        // 2) Fresh clone of manifest repo (retry for resilience)
+        sh "rm -rf ${MANIFEST_REPO_DIR}"
+        retry(3) {
+          sh """
+            set -euo pipefail
+            git clone --branch ${targetBranch} --depth 1 ${MANIFEST_REPO} ${MANIFEST_REPO_DIR}
+          """
+        }
+
+        // 3) Work inside repo dir
+        dir("${MANIFEST_REPO_DIR}") {
+          // Ensure correct remote (SSH)
+          sh "git remote set-url origin ${MANIFEST_REPO} || true"
+
+          // Git identity
+          sh """
+            set -euo pipefail
+            git config user.email "jenkins@company.com"
+            git config user.name "Jenkins CI"
+          """
+
+          // Validate service.yaml exists
+          sh """
+            set -euo pipefail
+            test -f base/service.yaml
+          """
+
+          // Update selector from blue -> green
+          sh """
+            set -euo pipefail
+            sed -i 's/version: blue/version: green/' base/service.yaml
+          """
+
+          // Check for changes
+          def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
+          if (!changes) {
+            echo "No manifest changes detected. Skipping commit/PR."
+          } else {
+            // Create PR branch
+            def prBranch = "promote-green-${env.GIT_COMMIT_SHORT}-${env.BUILD_NUMBER}"
+            sh "git checkout -b ${prBranch}"
+            sh "git add base/service.yaml"
+
+            // Commit only if staged changes exist
+            sh "git diff --cached --quiet || git commit -m 'chore: promote traffic to green (${env.GIT_COMMIT_SHORT})'"
+
+            // Push branch (retry for transient network issues)
+            retry(3) {
+              sh "git push --set-upstream origin ${prBranch}"
+            }
+            echo "Branch ${prBranch} pushed successfully."
+
+            // Create PR if gh CLI is available
+            def ghExists = sh(script: "which gh >/dev/null 2>&1 && echo true || echo false", returnStdout: true).trim()
+            if (ghExists == 'true') {
+              def repoName = sh(script: "git config --get remote.origin.url | sed -E 's#(git@|https://)github.com[:/]##; s#.git##'", returnStdout: true).trim()
+              sh """
+                set -euo pipefail
+                gh pr create --repo ${repoName} --head ${prBranch} --base ${targetBranch} \
+                  --title "Promote traffic to green" \
+                  --body "Automated manifest update by Jenkins (${env.BUILD_URL})"
+              """
+              echo "Pull Request created for branch ${prBranch} in repo ${repoName}."
+            } else {
+              echo "⚠️ gh CLI not installed. Branch pushed, please create PR manually."
+            }
+          }
+        } // end dir
+      } // end sshagent
+
+      echo "===== Promote to Green stage completed (PR created or skipped) ====="
+    }
+  }
+}
+
+
+// This is an ArgoCD CLI command. It tells ArgoCD to wait until a specific application (myapp) is fully deployed and healthy before continuing.
+// ArgoCD health gate after merge:  
+// Label: Sync + health verify
+// Description: After PR merge, argocd app wait myapp --health --sync --timeout 180 before any traffic switch.
+stage('Quality Gate: Verify Green') {
+  steps {
+    script {
+      // Wait for ArgoCD application to be Healthy and Synced
+      sh """
+        argocd app wait task-app --health --sync --timeout 180
+      """
+      echo "✅ ArgoCD reports Healthy/Synced"
+
+      // Optional smoke test 
+      sh """
+      STATUS=$(curl -s -o /tmp/health.json -w "%{http_code}" http://green-service:9393/actuator/health)
+      if [ "$STATUS" != "200" ]; then
+      echo "❌ Smoke test failed"
+      exit 1
+      fi
+      """
+    }
+  }
+}
+
+
+
+
+
+
+
+
+  } // end stages
+
+  // docker logout WE CAN ADD LOGOUT RIGHT AFTER PUSH INSIDE THE SCRIPT
+ post {
+  always {
+    sh 'docker logout || true'
+    echo '🧾 Archiving reports and test results'
+    junit allowEmptyResults: true, testResults: '**/surefire-reports/*.xml, **/failsafe-reports/*.xml'
+    recordCoverage(tools: [[parser: 'JACOCO', pattern: 'target/jacoco-report/jacoco.xml']], sourceDirectories: [[path: 'src/main/java']])
+    archiveArtifacts artifacts: 'report-*.html', allowEmptyArchive: true
+    echo "🏁 Cleaning Workspace."
+    cleanWs()
+    echo "🏁 Pipeline execution finished."
+  }
+  success {
+    echo '✅ Pipeline executed successfully.'
+    echo '🚀 Docker image successfully built and pushed!'
+  }
+  unstable {
+    echo "⚠️ Build is unstable - check warnings/quality gates"
+  }
+  failure {
+    echo "❌ CI/CD Pipeline failed! See console log for details."
+    script {
+      echo "🔄 Starting rollback: switching traffic back to BLUE..."
+
+      sshagent(['github-ssh-key']) {
+        // Detect default branch
+        def targetBranch = sh(
+          script: """
+            git ls-remote --symref ${env.MANIFEST_REPO} HEAD 2>/dev/null \
+            | awk '/^ref:/ {print \$2}' \
+            | sed 's@refs/heads/@@' \
+            | head -n1
+          """,
+          returnStdout: true
+        ).trim()
+        if (!targetBranch) { targetBranch = 'main' }
+        echo "Detected target branch: ${targetBranch}"
+
+        // Fresh clone
+        sh "rm -rf ${MANIFEST_REPO_DIR}"
+        retry(3) {
+          sh """
+            set -euo pipefail
+            git clone --branch ${targetBranch} --depth 1 ${MANIFEST_REPO} ${MANIFEST_REPO_DIR}
+          """
+        }
+
+        dir("${MANIFEST_REPO_DIR}") {
+          // Ensure correct remote
+          sh """
+            set -euo pipefail
+            git remote set-url origin ${MANIFEST_REPO} || true
+          """
+
+          // Git identity
+          sh """
+            set -euo pipefail
+            git config user.email "jenkins@company.com"
+            git config user.name "Jenkins CI"
+          """
+
+          // Validate file exists
+          sh """
+            set -euo pipefail
+            test -f base/service.yaml
+          """
+
+          // Flip selector
+          sh """
+            set -euo pipefail
+            sed -i 's/version: green/version: blue/' base/service.yaml
+          """
+
+          // Check for changes
+          def changes = sh(script: "git status --porcelain", returnStdout: true).trim()
+          if (!changes) {
+            echo "No rollback changes detected (already blue). Skipping commit/push."
+          } else {
+            sh "git add base/service.yaml"
+            sh "git diff --cached --quiet || git commit -m 'rollback: switch traffic back to blue'"
+
+            // Retry push
+            retry(3) {
+              sh "git push origin ${targetBranch}"
+            }
+            echo "✅ Rollback commit pushed successfully."
+          }
+        }
+      }
+      echo "🔄 Rollback stage completed."
+    }
+  }
+}
+
+}

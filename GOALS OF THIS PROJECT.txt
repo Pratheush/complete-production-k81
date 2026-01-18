@@ -42,9 +42,58 @@ how to use wildcard-domains with ingress ??
 
 
 
+Resource tuning: Configure Hikari pool size, JVM memory, and CPU/requests/limits to avoid noisy-node effects.
+WHEN Prometheus AND GRAFANA IS IMPLEMENTED THEN USE SIDECAR-CONTAINER FOR COLLECTING LOGS, METRICS
+- Dashboards:** Prometheus + Grafana to watch:  - Label: version=green vs version=blue  - Metrics: request rate, error rate, p95 latency, DB connection saturation.
+    - Alerting: Thresholds on 5xx errors and latency during canary stages.
+
+
+
 with prometheus and grafana improvise the application for advance testing like
 For deep metrics like throughput, latency distribution, and resource utilization, you’ll want to combine load testing tools (e.g., JMeter, Gatling, Locust, k6) with monitoring tools (e.g., Prometheus + Grafana, New Relic, Datadog). Load testing tools generate traffic, while monitoring tools capture system‑level metrics under stress.
 
+DATABASE MIGRATION FROM RUNNING ON ARRAYLIST  TO POSTGRESQL USE FLYWAY OR LIQUIBASE (ON RUNNING APPLICATION ON K8)
+
 For that advance our spring-task application with user data like USER(id,name,address,phone) and our task application is getting specific user related tasks like when user-id and user-name is given then the specific user-tasks will show up with user-details like name,address and phone
 so user-microservice is fetching for tasks from task-microservice. L
-LOGIN APPLICATION : > USER LOGIN AND SEE HIS TASK DETAILS AND USER-DETAILS. AND U USE JWT-TOKEN FOR SECURITY.
+LOGIN APPLICATION : > USER LOGIN AND SEE HIS TASK DETAILS AND USER-DETAILS. AND U USE JWT-TOKEN FOR SECURITY and ALSO SETUP ROLES
+
+ADMIN CAN ONLY VIEW TASKS OF ALL THE USERS
+AND specific USES CAN LOGIN AND SEE AND EDIT HIS TASKS AND HIS USER DETAILS.
+
+THIRED PHASE OF THE DEVELOPMENT : ONE USER CAN SHARE HIS SET OF TASKS TO OTHER USER WITH GIVING ROLES AND RIGHTS TO VIEW ONLY OR EDIT.
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+DOUBTS AND PROBLEMS TO TACKLE ::
+
+Both deployed separately (e.g., two Docker containers, two Kubernetes namespaces).
+
+
+
+
+Database setup
+Create PostgreSQL schema (tasks table).
+Use Flyway or Liquibase for migrations (so schema changes are versioned and reproducible).
+
+
+
+
+
+Routing traffic
+Use a reverse proxy / load balancer (NGINX, HAProxy, Kubernetes Ingress).
+For Blue‑Green: switch all traffic at once.
+For Canary: configure weighted routing (e.g., 90% → Blue, 10% → Green).
+
+
+
+
+
+Rollback plan
+If PostgreSQL version misbehaves, redirect traffic back to the ArrayList version (Blue).
+Keep DB migrations reversible (Flyway rollback scripts).
+
+
+
+
